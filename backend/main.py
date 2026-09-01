@@ -466,9 +466,16 @@ def api_info():
 
 # ==================== STATIC FILES ====================
 
-# Serve React frontend as static files
-frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
-if frontend_dist.exists():
+# Serve React frontend as static files.
+# In the Docker image, the built frontend is copied to /app/dist (sibling of main.py).
+# In local dev (running from backend/), fall back to ../frontend/dist.
+_candidates = [
+    Path(__file__).parent / "dist",
+    Path(__file__).parent.parent / "frontend" / "dist",
+]
+frontend_dist = next((p for p in _candidates if p.exists()), None)
+
+if frontend_dist:
     app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="static")
 else:
     # Fallback if dist doesn't exist yet
