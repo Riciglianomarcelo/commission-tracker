@@ -3,7 +3,7 @@ import { LogOut, Plus, Download, Trash2, CheckCircle2, Clock } from 'lucide-reac
 import axios from 'axios';
 import './App.css';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
+const API_BASE = import.meta.env.VITE_API_URL || '/api/v1';
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
