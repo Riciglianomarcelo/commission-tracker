@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
@@ -14,6 +15,8 @@ from auth_utils import (
     create_refresh_token, verify_token
 )
 from config import settings
+import os
+from pathlib import Path
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -460,3 +463,16 @@ def root():
         "version": "1.0.0",
         "docs": "/docs"
     }
+
+# ==================== STATIC FILES ====================
+
+# Serve React frontend as static files
+frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
+if frontend_dist.exists():
+    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="static")
+else:
+    # Fallback if dist doesn't exist yet
+    @app.get("/{full_path:path}")
+    def serve_frontend(full_path: str):
+        """Serve frontend - will be replaced by static files mount once built"""
+        return {"message": "Frontend not yet built. Visit /docs for API docs."}
