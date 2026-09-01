@@ -2,19 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;700&family=Hanken+Grotesk:wght@400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,700;1,800&display=swap');
 
 :root {
-  --charcoal: #1a1a1a;
-  --orange: #ff7c3e;
-  --blue: #0066cc;
+  --blue: #2381FF;
+  --ink: #0B0B0F;
+  --body: #5C6470;
 }
 
 body {
-  font-family: 'Hanken Grotesk', sans-serif;
-  @apply text-gray-800;
+  font-family: 'Inter', sans-serif;
+  color: var(--ink);
+  background-color: #FFFFFF;
 }
 
 h1, h2, h3, h4, h5, h6 {
-  font-family: 'Archivo', sans-serif;
+  font-family: 'Inter', sans-serif;
+  color: var(--ink);
+  letter-spacing: -0.02em;
 }
