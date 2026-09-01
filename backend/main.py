@@ -455,9 +455,9 @@ def health_check():
     """Health check endpoint"""
     return {"status": "ok", "timestamp": datetime.utcnow()}
 
-@app.get("/")
-def root():
-    """Root endpoint"""
+@app.get("/api/v1/info")
+def api_info():
+    """API info endpoint"""
     return {
         "name": "4Geeks Commission Tracker API",
         "version": "1.0.0",
