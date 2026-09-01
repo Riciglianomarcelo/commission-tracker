@@ -1,3 +1,15 @@
+FROM node:18-alpine as frontend-builder
+
+WORKDIR /build
+
+# Copy frontend code
+COPY frontend/ .
+
+# Build frontend
+RUN npm install --legacy-peer-deps && npm run build
+
+# ==================== Python Backend ====================
+
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -13,8 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all backend code
+# Copy backend code
 COPY backend/ .
+
+# Copy built frontend from builder stage
+COPY --from=frontend-builder /build/dist ./dist
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1
