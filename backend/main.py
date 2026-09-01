@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
-from database import engine, get_db
+from database import engine, get_db, SessionLocal
 from models import Base, User, Student, Approval, AuditLog
 from schemas import (
     UserCreate, UserLogin, TokenResponse, StudentCreate, StudentResponse,
@@ -32,6 +32,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Startup event - create demo users
+@app.on_event("startup")
+def startup_event():
+    db = SessionLocal()
+    try:
+        # Check if users exist
+        eli = db.query(User).filter(User.username == "eli").first()
+        if not eli:
+            eli_user = User(
+                username="eli",
+                email="eli@4geeks.com",
+                password_hash=hash_password("password"),
+                role="ADMISSIONS_REP",
+                is_active=True
+            )
+            db.add(eli_user)
+
+        admin = db.query(User).filter(User.username == "admin").first()
+        if not admin:
+            admin_user = User(
+                username="admin",
+                email="admin@4geeks.com",
+                password_hash=hash_password("password"),
+                role="ADMIN",
+                is_active=True
+            )
+            db.add(admin_user)
+
+        marcelo = db.query(User).filter(User.username == "marcelo").first()
+        if not marcelo:
+            marcelo_user = User(
+                username="marcelo",
+                email="marcelo@4geeks.com",
+                password_hash=hash_password("password"),
+                role="MARCELO",
+                is_active=True
+            )
+            db.add(marcelo_user)
+
+        db.commit()
+    except Exception as e:
+        print(f"Startup error: {e}")
+    finally:
+        db.close()
 
 # Helper function to get current user
 def get_current_user(token: str, db: Session = Depends(get_db)):
