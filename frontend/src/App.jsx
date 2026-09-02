@@ -107,12 +107,24 @@ export default function App() {
     setStudents([]);
   };
 
+  // If a request comes back 401 (expired/invalid session), log the user out cleanly
+  // instead of leaving them stuck on a broken dashboard with a cryptic error.
+  // Returns true if it handled the error (caller should stop), false otherwise.
+  const handleAuthError = (err) => {
+    if (err?.response?.status === 401) {
+      handleLogout();
+      setError('Your session expired — please log in again.');
+      return true;
+    }
+    return false;
+  };
+
   const loadStudents = async () => {
     try {
       const response = await axios.get(`${API_BASE}/students?month=${currentMonth}`, getAuthHeader());
       setStudents(response.data);
     } catch (err) {
-      console.error('Error loading students:', err);
+      if (!handleAuthError(err)) console.error('Error loading students:', err);
     }
   };
 
@@ -121,7 +133,7 @@ export default function App() {
       const response = await axios.get(`${API_BASE}/reports/monthly/${currentMonth}`, getAuthHeader());
       setReports([response.data]);
     } catch (err) {
-      console.error('Error loading reports:', err);
+      if (!handleAuthError(err)) console.error('Error loading reports:', err);
     }
   };
 
@@ -130,7 +142,7 @@ export default function App() {
       const response = await axios.get(`${API_BASE}/approvals/history`, getAuthHeader());
       setApprovals(response.data);
     } catch (err) {
-      console.error('Error loading approvals:', err);
+      if (!handleAuthError(err)) console.error('Error loading approvals:', err);
     }
   };
 
@@ -165,7 +177,7 @@ export default function App() {
       loadStudents();
       loadReports();
     } catch (err) {
-      setError(getErrorMessage(err, 'Error adding student'));
+      if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error adding student'));
     } finally {
       setLoading(false);
     }
@@ -179,7 +191,7 @@ export default function App() {
       loadStudents();
       loadReports();
     } catch (err) {
-      setError(getErrorMessage(err, 'Error deleting student'));
+      if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error deleting student'));
     }
   };
 
@@ -193,7 +205,7 @@ export default function App() {
       loadApprovals();
       alert(`Submitted for approval: ${currentMonth}`);
     } catch (err) {
-      setError(getErrorMessage(err, 'Error submitting'));
+      if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error submitting'));
     } finally {
       setLoading(false);
     }
@@ -209,7 +221,7 @@ export default function App() {
       loadApprovals();
       alert(`Approved: ${currentMonth}`);
     } catch (err) {
-      setError(getErrorMessage(err, 'Error approving'));
+      if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error approving'));
     } finally {
       setLoading(false);
     }
