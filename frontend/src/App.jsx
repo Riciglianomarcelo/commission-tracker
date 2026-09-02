@@ -6,6 +6,19 @@ import logo4geeks from './assets/4geeks-logo.svg';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api/v1';
 
+// FastAPI error bodies aren't always a plain string (422 validation errors come back
+// as an array of {loc, msg, type} objects). Rendering a non-string directly in JSX
+// crashes the whole page, so always coerce to a safe string first.
+const getErrorMessage = (err, fallback = 'Something went wrong') => {
+  const detail = err?.response?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail.map((d) => (typeof d === 'string' ? d : d?.msg || JSON.stringify(d))).join(', ');
+  }
+  if (detail && typeof detail === 'object') return JSON.stringify(detail);
+  return err?.message || fallback;
+};
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
@@ -80,7 +93,7 @@ export default function App() {
       loadStudents();
       loadReports();
     } catch (err) {
-      setError(err.response?.data?.detail || 'Login failed');
+      setError(getErrorMessage(err, 'Login failed'));
     } finally {
       setLoading(false);
     }
@@ -152,7 +165,7 @@ export default function App() {
       loadStudents();
       loadReports();
     } catch (err) {
-      setError(err.response?.data?.detail || 'Error adding student');
+      setError(getErrorMessage(err, 'Error adding student'));
     } finally {
       setLoading(false);
     }
@@ -166,7 +179,7 @@ export default function App() {
       loadStudents();
       loadReports();
     } catch (err) {
-      setError('Error deleting student');
+      setError(getErrorMessage(err, 'Error deleting student'));
     }
   };
 
@@ -180,7 +193,7 @@ export default function App() {
       loadApprovals();
       alert(`Submitted for approval: ${currentMonth}`);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Error submitting');
+      setError(getErrorMessage(err, 'Error submitting'));
     } finally {
       setLoading(false);
     }
@@ -196,7 +209,7 @@ export default function App() {
       loadApprovals();
       alert(`Approved: ${currentMonth}`);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Error approving');
+      setError(getErrorMessage(err, 'Error approving'));
     } finally {
       setLoading(false);
     }
@@ -320,13 +333,16 @@ export default function App() {
         {/* Month Selector */}
         <div className="bg-white rounded-card border border-border shadow-card p-4 mb-6 flex flex-wrap gap-4 justify-between items-center">
           <div className="flex items-center gap-4">
-            <label className="font-semibold text-ink text-sm">Month</label>
-            <input
-              type="month"
-              value={currentMonth}
-              onChange={(e) => setCurrentMonth(e.target.value)}
-              className={inputClass}
-            />
+            <div>
+              <label className="block text-xs font-semibold text-muted mb-1">Commission Month</label>
+              <input
+                type="month"
+                value={currentMonth}
+                onChange={(e) => setCurrentMonth(e.target.value)}
+                className={inputClass}
+              />
+            </div>
+            <p className="text-xs text-body max-w-xs hidden md:block">New students you add are recorded against this month for commission reporting.</p>
           </div>
           <button
             onClick={exportCSV}
@@ -398,20 +414,16 @@ export default function App() {
                   onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                   className={inputClass}
                 />
-                <input
-                  type="date"
-                  value={formData.start_date}
-                  onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <input
-                  type="date"
-                  placeholder="Graduation Date"
-                  value={formData.graduation_date}
-                  onChange={(e) => setFormData({ ...formData, graduation_date: e.target.value })}
-                  className={inputClass}
-                />
+                <div>
+                  <label className="block text-xs font-semibold text-muted mb-1.5">Start Date</label>
+                  <input
+                    type="date"
+                    value={formData.start_date}
+                    onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
+                    className={`w-full ${inputClass}`}
+                    required
+                  />
+                </div>
                 <input
                   type="number"
                   step="0.01"
@@ -540,20 +552,26 @@ export default function App() {
                   onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                   className={inputClass}
                 />
-                <input
-                  type="date"
-                  value={formData.start_date}
-                  onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <input
-                  type="date"
-                  value={formData.graduation_date}
-                  onChange={(e) => setFormData({ ...formData, graduation_date: e.target.value })}
-                  className={inputClass}
-                  required
-                />
+                <div>
+                  <label className="block text-xs font-semibold text-muted mb-1.5">Start Date</label>
+                  <input
+                    type="date"
+                    value={formData.start_date}
+                    onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
+                    className={`w-full ${inputClass}`}
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-muted mb-1.5">Graduation Date</label>
+                  <input
+                    type="date"
+                    value={formData.graduation_date}
+                    onChange={(e) => setFormData({ ...formData, graduation_date: e.target.value })}
+                    className={`w-full ${inputClass}`}
+                    required
+                  />
+                </div>
                 <input
                   type="number"
                   step="0.01"
