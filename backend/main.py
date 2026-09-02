@@ -1,6 +1,7 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
@@ -81,8 +82,14 @@ def startup_event():
     finally:
         db.close()
 
-# Helper function to get current user
-def get_current_user(token: str, db: Session = Depends(get_db)):
+# Helper function to get current user from the Authorization: Bearer <token> header
+security = HTTPBearer()
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    token = credentials.credentials
     payload = verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -138,7 +145,7 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
     }
 
 @app.post("/api/v1/auth/refresh", response_model=TokenResponse)
-def refresh(refresh_token: str, db: Session = Depends(get_db)):
+def refresh(refresh_token: str = Body(..., embed=True), db: Session = Depends(get_db)):
     """Refresh access token"""
     payload = verify_token(refresh_token)
     if not payload:
@@ -161,19 +168,10 @@ def refresh(refresh_token: str, db: Session = Depends(get_db)):
 @app.post("/api/v1/students", response_model=StudentResponse)
 def create_student(
     student: StudentCreate,
-    token: str,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Create new student (prevents duplicates by email + month)"""
-    # Verify user
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user = db.query(User).filter(User.id == payload.get("sub")).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
     # Check for duplicate (same email + month)
     if student.email:
         existing = db.query(Student).filter(
@@ -223,22 +221,14 @@ def create_student(
     return new_student
 
 @app.get("/api/v1/students", response_model=list[StudentResponse])
-def list_students(month: str, token: str, db: Session = Depends(get_db)):
+def list_students(month: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """List students for a month"""
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
     students = db.query(Student).filter(Student.month == month).all()
     return students
 
 @app.get("/api/v1/students/{student_id}", response_model=StudentResponse)
-def get_student(student_id: int, token: str, db: Session = Depends(get_db)):
+def get_student(student_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get student details"""
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
     student = db.query(Student).filter(Student.id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -246,16 +236,8 @@ def get_student(student_id: int, token: str, db: Session = Depends(get_db)):
     return student
 
 @app.delete("/api/v1/students/{student_id}")
-def delete_student(student_id: int, token: str, db: Session = Depends(get_db)):
+def delete_student(student_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Delete student"""
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user = db.query(User).filter(User.id == payload.get("sub")).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
     student = db.query(Student).filter(Student.id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -281,14 +263,8 @@ def delete_student(student_id: int, token: str, db: Session = Depends(get_db)):
 # ==================== APPROVAL ENDPOINTS ====================
 
 @app.post("/api/v1/approvals/submit", response_model=ApprovalResponse)
-def submit_for_approval(approval: ApprovalCreate, token: str, db: Session = Depends(get_db)):
+def submit_for_approval(approval: ApprovalCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Submit month for admin review"""
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user = db.query(User).filter(User.id == payload.get("sub")).first()
-
     # Only ADMISSIONS_REP can submit
     if user.role != "ADMISSIONS_REP":
         raise HTTPException(status_code=403, detail="Only admissions rep can submit")
@@ -325,14 +301,8 @@ def submit_for_approval(approval: ApprovalCreate, token: str, db: Session = Depe
     return apr
 
 @app.post("/api/v1/approvals/approve", response_model=ApprovalResponse)
-def approve_commission(approval: ApprovalCreate, token: str, db: Session = Depends(get_db)):
+def approve_commission(approval: ApprovalCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Final approval by Marcelo"""
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user = db.query(User).filter(User.id == payload.get("sub")).first()
-
     # Only MARCELO can approve
     if user.role != "MARCELO":
         raise HTTPException(status_code=403, detail="Only Marcelo can approve")
@@ -361,24 +331,16 @@ def approve_commission(approval: ApprovalCreate, token: str, db: Session = Depen
     return apr
 
 @app.get("/api/v1/approvals/history", response_model=list[ApprovalResponse])
-def approval_history(token: str, db: Session = Depends(get_db)):
+def approval_history(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get approval history"""
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
     approvals = db.query(Approval).order_by(Approval.month.desc()).all()
     return approvals
 
 # ==================== REPORT ENDPOINTS ====================
 
 @app.get("/api/v1/reports/monthly/{month}", response_model=MonthlyReportResponse)
-def monthly_report(month: str, token: str, db: Session = Depends(get_db)):
+def monthly_report(month: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get monthly report"""
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
     # Get students
     students = db.query(Student).filter(Student.month == month).all()
     enrolled = [s for s in students if not s.is_graduate]
@@ -409,12 +371,8 @@ def monthly_report(month: str, token: str, db: Session = Depends(get_db)):
     )
 
 @app.get("/api/v1/reports/all", response_model=list[MonthlyReportResponse])
-def all_reports(token: str, db: Session = Depends(get_db)):
+def all_reports(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get all monthly reports"""
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
     # Get unique months
     months = db.query(Student.month).distinct().order_by(Student.month.desc()).all()
 
