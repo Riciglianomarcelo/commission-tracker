@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { LogOut, Download, Trash2, Pencil, Check, X, CheckCircle2, Clock } from 'lucide-react';
+import { LogOut, Download, Trash2, Pencil, Check, X, CheckCircle2, Clock, KeyRound, GraduationCap } from 'lucide-react';
 import axios from 'axios';
 import './App.css';
 import logo4geeks from './assets/4geeks-logo.svg';
@@ -36,6 +36,13 @@ export default function App() {
   const canManage = user?.role === 'ADMIN' || user?.role === 'MARCELO';
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
+
+  // Change password modal — any logged-in user can change their own password
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ current_password: '', new_password: '', confirm_password: '' });
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordSuccess, setPasswordSuccess] = useState('');
+  const [passwordLoading, setPasswordLoading] = useState(false);
 
   const [formData, setFormData] = useState({
     name: '',
@@ -162,6 +169,10 @@ export default function App() {
         month: currentMonth,
         tuition_amount: parseFloat(formData.tuition_amount),
         commission_percentage: parseFloat(formData.commission_percentage),
+        // Optional date field — the backend expects either a real date or nothing at
+        // all, but an empty string from the untouched input is neither, so it must
+        // be converted to null before it ever reaches the API.
+        graduation_date: formData.graduation_date || null,
       };
 
       await axios.post(`${API_BASE}/students`, payload, getAuthHeader());
@@ -188,6 +199,65 @@ export default function App() {
     }
   };
 
+  const openPasswordModal = () => {
+    setPasswordForm({ current_password: '', new_password: '', confirm_password: '' });
+    setPasswordError('');
+    setPasswordSuccess('');
+    setShowPasswordModal(true);
+  };
+
+  const closePasswordModal = () => {
+    setShowPasswordModal(false);
+  };
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    setPasswordError('');
+    setPasswordSuccess('');
+
+    if (passwordForm.new_password !== passwordForm.confirm_password) {
+      setPasswordError('New password and confirmation do not match');
+      return;
+    }
+    if (passwordForm.new_password.length < 6) {
+      setPasswordError('New password must be at least 6 characters');
+      return;
+    }
+
+    setPasswordLoading(true);
+    try {
+      await axios.post(`${API_BASE}/auth/change-password`, {
+        current_password: passwordForm.current_password,
+        new_password: passwordForm.new_password,
+      }, getAuthHeader());
+
+      setPasswordSuccess('Password updated successfully');
+      setPasswordForm({ current_password: '', new_password: '', confirm_password: '' });
+    } catch (err) {
+      if (!handleAuthError(err)) setPasswordError(getErrorMessage(err, 'Error changing password'));
+    } finally {
+      setPasswordLoading(false);
+    }
+  };
+
+  // Moves an existing enrolled record into the Graduates tab in place, instead of
+  // requiring it to be re-entered from scratch on the Add Graduate form.
+  const handleMarkGraduate = async (student) => {
+    if (!student.graduation_date) {
+      setError(`Set a graduation date for ${student.name} first (click the pencil to edit), then mark them as a graduate.`);
+      return;
+    }
+    if (!confirm(`Move ${student.name} to Graduates?`)) return;
+
+    try {
+      await axios.patch(`${API_BASE}/students/${student.id}`, { is_graduate: true, status: 'graduated' }, getAuthHeader());
+      loadStudents();
+      loadReports();
+    } catch (err) {
+      if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error marking student as graduate'));
+    }
+  };
+
   const handleDeleteStudent = async (id) => {
     if (!confirm('Delete this student record?')) return;
 
@@ -209,6 +279,7 @@ export default function App() {
       commission_percentage: student.commission_percentage,
       payment_type: student.payment_type,
       status: student.status,
+      graduation_date: student.graduation_date || '',
     });
   };
 
@@ -224,6 +295,9 @@ export default function App() {
         ...editForm,
         tuition_amount: parseFloat(editForm.tuition_amount),
         commission_percentage: parseFloat(editForm.commission_percentage),
+        // Same rule as adding a student: an untouched date input is an empty
+        // string, which the backend rejects — send null instead when it's blank.
+        graduation_date: editForm.graduation_date || null,
       };
       await axios.patch(`${API_BASE}/students/${id}`, payload, getAuthHeader());
       cancelEdit();
@@ -363,6 +437,13 @@ export default function App() {
               <p className="font-semibold text-ink capitalize text-sm">{user?.role?.replace('_', ' ')}</p>
             </div>
             <button
+              onClick={openPasswordModal}
+              className={`${secondaryBtn} flex items-center gap-2 !py-2 !px-4`}
+            >
+              <KeyRound size={16} />
+              Change Password
+            </button>
+            <button
               onClick={handleLogout}
               className={`${secondaryBtn} flex items-center gap-2 !py-2 !px-4`}
             >
@@ -372,6 +453,77 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Change Password Modal */}
+      {showPasswordModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-card border border-border shadow-card p-8 w-full max-w-sm">
+            <h2 className="text-lg font-bold text-ink mb-1">Change Password</h2>
+            <p className="text-sm text-body mb-6">Update the password for your account.</p>
+
+            {passwordError && (
+              <div className="bg-red-soft border border-red/20 text-red px-4 py-3 rounded-[10px] mb-4 text-sm">
+                {passwordError}
+              </div>
+            )}
+            {passwordSuccess && (
+              <div className="bg-green-100 border border-green-700/20 text-green-700 px-4 py-3 rounded-[10px] mb-4 text-sm">
+                {passwordSuccess}
+              </div>
+            )}
+
+            <form onSubmit={handleChangePassword} className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-ink mb-2">Current Password</label>
+                <input
+                  type="password"
+                  value={passwordForm.current_password}
+                  onChange={(e) => setPasswordForm({ ...passwordForm, current_password: e.target.value })}
+                  className={`w-full ${inputClass}`}
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-ink mb-2">New Password</label>
+                <input
+                  type="password"
+                  value={passwordForm.new_password}
+                  onChange={(e) => setPasswordForm({ ...passwordForm, new_password: e.target.value })}
+                  className={`w-full ${inputClass}`}
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-ink mb-2">Confirm New Password</label>
+                <input
+                  type="password"
+                  value={passwordForm.confirm_password}
+                  onChange={(e) => setPasswordForm({ ...passwordForm, confirm_password: e.target.value })}
+                  className={`w-full ${inputClass}`}
+                  required
+                />
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closePasswordModal}
+                  className={`flex-1 ${secondaryBtn}`}
+                >
+                  Close
+                </button>
+                <button
+                  type="submit"
+                  disabled={passwordLoading}
+                  className={`flex-1 ${primaryBtn}`}
+                >
+                  {passwordLoading ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       <div className="max-w-7xl mx-auto px-6 py-8">
         {/* Month Selector */}
@@ -468,6 +620,15 @@ export default function App() {
                     required
                   />
                 </div>
+                <div>
+                  <label className="block text-xs font-semibold text-muted mb-1.5">Expected Graduation Date (optional)</label>
+                  <input
+                    type="date"
+                    value={formData.graduation_date}
+                    onChange={(e) => setFormData({ ...formData, graduation_date: e.target.value })}
+                    className={`w-full ${inputClass}`}
+                  />
+                </div>
                 <input
                   type="number"
                   step="0.01"
@@ -521,6 +682,7 @@ export default function App() {
                       <tr className="border-b border-border">
                         <th className="text-left px-4 py-2 font-semibold text-ink">Name</th>
                         <th className="text-left px-4 py-2 font-semibold text-ink">Program</th>
+                        <th className="text-left px-4 py-2 font-semibold text-ink">Expected Graduation</th>
                         <th className="text-left px-4 py-2 font-semibold text-ink">Tuition</th>
                         <th className="text-left px-4 py-2 font-semibold text-ink">Commission</th>
                         <th className="text-left px-4 py-2 font-semibold text-ink">Status</th>
@@ -536,6 +698,9 @@ export default function App() {
                             </td>
                             <td className="px-4 py-2">
                               <input value={editForm.program} onChange={(e) => setEditForm({ ...editForm, program: e.target.value })} className={`w-full ${inputClass}`} />
+                            </td>
+                            <td className="px-4 py-2">
+                              <input type="date" value={editForm.graduation_date} onChange={(e) => setEditForm({ ...editForm, graduation_date: e.target.value })} className={`w-full ${inputClass}`} />
                             </td>
                             <td className="px-4 py-2">
                               <input type="number" step="0.01" value={editForm.tuition_amount} onChange={(e) => setEditForm({ ...editForm, tuition_amount: e.target.value })} className={`w-full ${inputClass}`} />
@@ -561,6 +726,7 @@ export default function App() {
                           <tr key={student.id} className="border-b border-border hover:bg-bg-gray">
                             <td className="px-4 py-3 text-ink">{student.name}</td>
                             <td className="px-4 py-3 text-body">{student.program}</td>
+                            <td className="px-4 py-3 text-body">{student.graduation_date || '—'}</td>
                             <td className="px-4 py-3 font-semibold text-ink">${student.tuition_amount.toFixed(2)}</td>
                             <td className="px-4 py-3 font-semibold text-blue">${student.commission_amount.toFixed(2)}</td>
                             <td className="px-4 py-3">
@@ -575,6 +741,13 @@ export default function App() {
                             <td className="px-4 py-3 text-center whitespace-nowrap">
                               {canManage ? (
                                 <>
+                                  <button
+                                    onClick={() => handleMarkGraduate(student)}
+                                    className="text-blue hover:opacity-70 transition mr-3"
+                                    title="Mark as Graduate"
+                                  >
+                                    <GraduationCap size={16} />
+                                  </button>
                                   <button
                                     onClick={() => startEdit(student)}
                                     className="text-blue hover:opacity-70 transition mr-3"
@@ -727,7 +900,9 @@ export default function App() {
                             <td className="px-4 py-2">
                               <input value={editForm.program} onChange={(e) => setEditForm({ ...editForm, program: e.target.value })} className={`w-full ${inputClass}`} />
                             </td>
-                            <td className="px-4 py-3 text-body">{student.graduation_date}</td>
+                            <td className="px-4 py-2">
+                              <input type="date" value={editForm.graduation_date} onChange={(e) => setEditForm({ ...editForm, graduation_date: e.target.value })} className={`w-full ${inputClass}`} />
+                            </td>
                             <td className="px-4 py-2">
                               <input type="number" step="0.01" value={editForm.tuition_amount} onChange={(e) => setEditForm({ ...editForm, tuition_amount: e.target.value })} className={`w-full ${inputClass}`} />
                             </td>
@@ -744,7 +919,7 @@ export default function App() {
                           <tr key={student.id} className="border-b border-border hover:bg-bg-gray">
                             <td className="px-4 py-3 text-ink">{student.name}</td>
                             <td className="px-4 py-3 text-body">{student.program}</td>
-                            <td className="px-4 py-3 text-body">{student.graduation_date}</td>
+                            <td className="px-4 py-3 text-body">{student.graduation_date || '—'}</td>
                             <td className="px-4 py-3 font-semibold text-ink">${student.tuition_amount.toFixed(2)}</td>
                             <td className="px-4 py-3 font-semibold text-blue">${student.commission_amount.toFixed(2)}</td>
                             <td className="px-4 py-3 text-center whitespace-nowrap">
