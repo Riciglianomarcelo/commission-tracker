@@ -12,6 +12,10 @@ class UserLogin(BaseModel):
     username: str
     password: str
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
@@ -37,6 +41,8 @@ class StudentUpdate(BaseModel):
     commission_percentage: Optional[float] = None
     payment_type: Optional[str] = None
     status: Optional[str] = None
+    graduation_date: Optional[date] = None
+    is_graduate: Optional[bool] = None
 
 class StudentResponse(BaseModel):
     id: int
