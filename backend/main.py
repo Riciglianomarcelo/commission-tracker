@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from database import engine, get_db, SessionLocal
 from models import Base, User, Student, Approval, AuditLog
 from schemas import (
-    UserCreate, UserLogin, TokenResponse, StudentCreate, StudentUpdate, StudentResponse,
+    UserCreate, UserLogin, ChangePasswordRequest, TokenResponse, StudentCreate, StudentUpdate, StudentResponse,
     ApprovalCreate, ApprovalResponse, MonthlyReportResponse
 )
 from auth_utils import (
@@ -17,6 +17,7 @@ from auth_utils import (
 )
 from config import settings
 import os
+import re
 from pathlib import Path
 
 # Create tables
@@ -100,6 +101,15 @@ def get_current_user(
 
     return user
 
+MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+def refresh_approval_total(db: Session, month: str):
+    """Recompute the stored total on a month's approval record (if one exists)."""
+    apr = db.query(Approval).filter(Approval.month == month).first()
+    if apr:
+        total = db.query(func.coalesce(func.sum(Student.commission_amount), 0.0)).filter(Student.month == month).scalar()
+        apr.total_commission = float(total or 0.0)
+        db.commit()
 # ==================== AUTH ENDPOINTS ====================
 
 @app.post("/api/v1/auth/register", response_model=dict)
@@ -251,6 +261,30 @@ def update_student(
         raise HTTPException(status_code=404, detail="Student not found")
 
     update_data = update.dict(exclude_unset=True)
+
+    # --- Commission month change (super admin only) ---
+    old_month = student.month
+    new_month = update_data.pop("month", None)
+    if new_month is not None and new_month != old_month:
+        if user.role != "MARCELO":
+            raise HTTPException(status_code=403, detail="Only the super admin can change a record's commission month")
+        if not MONTH_RE.match(new_month):
+            raise HTTPException(status_code=422, detail="Month must be in YYYY-MM format")
+        if student.email:
+            clash = db.query(Student).filter(
+                Student.email == student.email,
+                Student.month == new_month,
+                Student.id != student.id,
+            ).first()
+            if clash:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{student.email} already has a record in {new_month} — delete or merge that one first",
+                )
+        student.month = new_month
+    else:
+        new_month = None
+
     for field, value in update_data.items():
         setattr(student, field, value)
 
@@ -261,12 +295,20 @@ def update_student(
     db.commit()
     db.refresh(student)
 
+    # Keep stored approval totals in sync with the records actually in each month
+    refresh_approval_total(db, student.month)
+    if new_month:
+        refresh_approval_total(db, old_month)
+
+    changed = list(update_data.keys())
+    if new_month:
+        changed.append(f"month {old_month} → {new_month}")
     log = AuditLog(
         user_id=user.id,
         action="update",
         entity_type="Student",
         entity_id=student.id,
-        changes=f"Updated fields: {', '.join(update_data.keys())}",
+        changes=f"Updated fields: {', '.join(changed)}",
         month=student.month
     )
     db.add(log)
@@ -447,6 +489,57 @@ def all_reports(user: User = Depends(get_current_user), db: Session = Depends(ge
         ))
 
     return reports
+
+# ==================== DASHBOARD ====================
+
+@app.get("/api/v1/dashboard/data")
+def dashboard_data(
+    from_month: str | None = None,
+    to_month: str | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """All records (optionally within a month range) plus approval statuses, for the
+    dashboard. The frontend slices and aggregates these, so any filter/breakdown
+    can be added there without a new endpoint. Admin/Marcelo only."""
+    if user.role not in ("ADMIN", "MARCELO"):
+        raise HTTPException(status_code=403, detail="Dashboard is available to Admin and Marcelo only")
+    for m in (from_month, to_month):
+        if m and not MONTH_RE.match(m):
+            raise HTTPException(status_code=422, detail="Months must be in YYYY-MM format")
+
+    q = db.query(Student)
+    if from_month:
+        q = q.filter(Student.month >= from_month)
+    if to_month:
+        q = q.filter(Student.month <= to_month)
+    students = q.order_by(Student.month).all()
+
+    approvals = {a.month: a.status for a in db.query(Approval).all()}
+    all_months = [m for (m,) in db.query(Student.month).distinct().order_by(Student.month).all()]
+
+    return {
+        "records": [StudentResponse.model_validate(s).model_dump(mode="json") for s in students],
+        "approvals": approvals,
+        "available_months": all_months,
+    }
+
+# ==================== ACCOUNT ====================
+
+@app.post("/api/v1/auth/change-password")
+def change_password(
+    req: ChangePasswordRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Change the logged-in user's own password"""
+    if not verify_password(req.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if len(req.new_password) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+    user.password_hash = hash_password(req.new_password)
+    db.commit()
+    return {"message": "Password updated"}
 
 # ==================== HEALTH CHECK ====================
 

@@ -43,6 +43,9 @@ class StudentUpdate(BaseModel):
     status: Optional[str] = None
     graduation_date: Optional[date] = None
     is_graduate: Optional[bool] = None
+    # Commission month (YYYY-MM). Only the super admin (MARCELO) may change it —
+    # used to fix records a rep filed under the wrong month.
+    month: Optional[str] = None
 
 class StudentResponse(BaseModel):
     id: int
@@ -57,6 +60,7 @@ class StudentResponse(BaseModel):
     status: str
     is_graduate: bool
     month: str
+    email: Optional[str] = None
     created_at: datetime
 
     class Config:

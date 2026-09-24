@@ -3,6 +3,7 @@ import { LogOut, Download, Trash2, Pencil, Check, X, CheckCircle2, Clock, KeyRou
 import axios from 'axios';
 import './App.css';
 import logo4geeks from './assets/4geeks-logo.svg';
+import Dashboard from './Dashboard.jsx';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api/v1';
 
@@ -34,6 +35,10 @@ export default function App() {
 
   // Editing an existing record — only Admin/Marcelo can edit or delete (enforced here and on the backend)
   const canManage = user?.role === 'ADMIN' || user?.role === 'MARCELO';
+  // Super admin (Marcelo) can additionally move a record to a different commission month
+  const isSuperAdmin = user?.role === 'MARCELO';
+  // Shown after a record is moved out of the month being viewed
+  const [notice, setNotice] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
 
@@ -280,6 +285,7 @@ export default function App() {
       payment_type: student.payment_type,
       status: student.status,
       graduation_date: student.graduation_date || '',
+      month: student.month,
     });
   };
 
@@ -290,9 +296,14 @@ export default function App() {
 
   const saveEdit = async (id) => {
     setError('');
+    setNotice(null);
     try {
+      const student = students.find((s) => s.id === id);
+      const movedTo = isSuperAdmin && editForm.month && editForm.month !== student?.month ? editForm.month : null;
+      const { month, ...rest } = editForm;
       const payload = {
-        ...editForm,
+        ...rest,
+        ...(movedTo ? { month: movedTo } : {}),
         tuition_amount: parseFloat(editForm.tuition_amount),
         commission_percentage: parseFloat(editForm.commission_percentage),
         // Same rule as adding a student: an untouched date input is an empty
@@ -300,6 +311,7 @@ export default function App() {
         graduation_date: editForm.graduation_date || null,
       };
       await axios.patch(`${API_BASE}/students/${id}`, payload, getAuthHeader());
+      if (movedTo) setNotice({ text: `${student.name} was moved from ${student.month} to ${movedTo}.`, month: movedTo });
       cancelEdit();
       loadStudents();
       loadReports();
@@ -557,9 +569,19 @@ export default function App() {
           </div>
         )}
 
+        {notice && (
+          <div className="bg-blue-soft border border-blue/20 text-ink px-4 py-3 rounded-[10px] mb-4 text-sm flex justify-between items-center gap-4">
+            <span>{notice.text}</span>
+            <span className="flex items-center gap-4 whitespace-nowrap">
+              <button onClick={() => { setCurrentMonth(notice.month); setNotice(null); }} className="font-semibold text-blue">Go to {notice.month}</button>
+              <button onClick={() => setNotice(null)} className="font-semibold">✕</button>
+            </span>
+          </div>
+        )}
+
         {/* Tabs */}
         <div className="flex gap-2 mb-6 border-b border-border">
-          {['enrolled', 'graduates', 'summary', 'history'].map(tab => (
+          {['enrolled', 'graduates', 'summary', 'history', ...(canManage ? ['dashboard'] : [])].map(tab => (
             <button
               key={tab}
               onClick={() => {
@@ -576,6 +598,7 @@ export default function App() {
               {tab === 'graduates' && 'Graduates'}
               {tab === 'summary' && 'Summary'}
               {tab === 'history' && 'History'}
+              {tab === 'dashboard' && 'Dashboard'}
             </button>
           ))}
         </div>
@@ -695,6 +718,12 @@ export default function App() {
                           <tr key={student.id} className="border-b border-border bg-blue-tint">
                             <td className="px-4 py-2">
                               <input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} className={`w-full ${inputClass}`} />
+                              {isSuperAdmin && (
+                                <label className="block mt-2">
+                                  <span className="block text-[11px] font-semibold text-muted mb-1">Commission month</span>
+                                  <input type="month" value={editForm.month} onChange={(e) => setEditForm({ ...editForm, month: e.target.value })} className={`w-full ${inputClass}`} />
+                                </label>
+                              )}
                             </td>
                             <td className="px-4 py-2">
                               <input value={editForm.program} onChange={(e) => setEditForm({ ...editForm, program: e.target.value })} className={`w-full ${inputClass}`} />
@@ -896,6 +925,12 @@ export default function App() {
                           <tr key={student.id} className="border-b border-border bg-blue-tint">
                             <td className="px-4 py-2">
                               <input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} className={`w-full ${inputClass}`} />
+                              {isSuperAdmin && (
+                                <label className="block mt-2">
+                                  <span className="block text-[11px] font-semibold text-muted mb-1">Commission month</span>
+                                  <input type="month" value={editForm.month} onChange={(e) => setEditForm({ ...editForm, month: e.target.value })} className={`w-full ${inputClass}`} />
+                                </label>
+                              )}
                             </td>
                             <td className="px-4 py-2">
                               <input value={editForm.program} onChange={(e) => setEditForm({ ...editForm, program: e.target.value })} className={`w-full ${inputClass}`} />
@@ -1046,6 +1081,11 @@ export default function App() {
               </div>
             </div>
           </div>
+        )}
+
+        {/* Dashboard Tab — all months, not tied to the month selector */}
+        {activeTab === 'dashboard' && canManage && (
+          <Dashboard apiBase={API_BASE} getAuthHeader={getAuthHeader} onAuthError={handleAuthError} />
         )}
 
         {/* History Tab */}
