@@ -139,14 +139,32 @@ def log_action(db: Session, user: User, action: str, entity_type: str, entity_id
 
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
 def login(credentials: UserLogin, db: Session = Depends(get_db)):
-    """Login and get tokens"""
-    user = db.query(User).filter(User.username == credentials.username).first()
+    """Login with username OR email (case-insensitive) and get tokens"""
+    ident = (credentials.username or "").strip().lower()
+    user = db.query(User).filter(
+        (func.lower(User.username) == ident) | (func.lower(User.email) == ident)
+    ).first()
 
-    if not user or not verify_password(credentials.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    # Accept the password as typed, or without stray leading/trailing spaces
+    # (common when it was copied from a chat message)
+    raw = credentials.password or ""
+    ok = bool(user) and (
+        verify_password(raw, user.password_hash)
+        or (raw.strip() != raw and verify_password(raw.strip(), user.password_hash))
+    )
+    if not ok:
+        # Logged for troubleshooting only — never the password itself
+        reason = "unknown username/email" if not user else "wrong password"
+        print(f"[auth] failed login for '{ident}': {reason}", flush=True)
+        raise HTTPException(
+            status_code=401,
+            detail="Wrong username or password. You can use your username or your email. Ask Marcelo to reset it if needed.",
+        )
 
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="User is inactive")
+        print(f"[auth] blocked login for '{ident}': account deactivated", flush=True)
+        raise HTTPException(status_code=403, detail="This account is deactivated. Ask Marcelo to reactivate it.")
+    print(f"[auth] login ok for '{user.username}'", flush=True)
 
     access_token = create_access_token({"sub": str(user.id), "role": user.role})
     refresh_token = create_refresh_token({"sub": str(user.id)})
@@ -209,19 +227,21 @@ def _create_user(data: UserCreate, actor: User, db: Session) -> User:
     if data.role not in ROLES:
         raise HTTPException(status_code=422, detail=f"Role must be one of {', '.join(ROLES)}")
     check_location(data.location)
-    if len(data.password) < 6:
+    password = (data.password or "").strip()
+    if len(password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     username = data.username.strip().lower()
     if not re.match(r"^[a-z0-9._-]{2,40}$", username):
         raise HTTPException(status_code=422, detail="Username: 2–40 characters, letters, numbers, dot, dash or underscore")
     if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=400, detail="Username already taken")
-    if db.query(User).filter(User.email == data.email).first():
+    email = data.email.strip().lower()
+    if db.query(User).filter(func.lower(User.email) == email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
     new_user = User(
-        email=data.email, username=username, full_name=(data.full_name or "").strip() or None,
-        password_hash=hash_password(data.password), role=data.role, location=data.location, is_active=True,
+        email=email, username=username, full_name=(data.full_name or "").strip() or None,
+        password_hash=hash_password(password), role=data.role, location=data.location, is_active=True,
     )
     db.add(new_user)
     db.commit()
@@ -253,10 +273,13 @@ def update_user(user_id: int, update: UserUpdate, user: User = Depends(get_curre
     check_location(data.get("location"))
     if target.id == user.id and (data.get("is_active") is False or data.get("role", "MARCELO") != "MARCELO"):
         raise HTTPException(status_code=400, detail="You can't deactivate or demote your own account")
-    if "email" in data and db.query(User).filter(User.email == data["email"], User.id != target.id).first():
+    if "email" in data:
+        data["email"] = data["email"].strip().lower()
+    if "email" in data and db.query(User).filter(func.lower(User.email) == data["email"], User.id != target.id).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
     new_password = data.pop("new_password", None)
+    new_password = new_password.strip() if new_password else None
     if new_password is not None:
         if len(new_password) < 6:
             raise HTTPException(status_code=400, detail="Password must be at least 6 characters")

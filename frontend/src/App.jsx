@@ -479,9 +479,11 @@ export default function App() {
 
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
-                <label className="block text-sm font-semibold text-ink mb-2">Username</label>
+                <label className="block text-sm font-semibold text-ink mb-2">Username or email</label>
                 <input
                   type="text"
+                  name="username"
+                  autoComplete="username"
                   value={credentials.username}
                   onChange={(e) => setCredentials({ ...credentials, username: e.target.value.trim().toLowerCase() })}
                   className={`w-full ${inputClass}`}
@@ -494,6 +496,8 @@ export default function App() {
                 <label className="block text-sm font-semibold text-ink mb-2">Password</label>
                 <input
                   type="password"
+                  name="password"
+                  autoComplete="current-password"
                   value={credentials.password}
                   onChange={(e) => setCredentials({ ...credentials, password: e.target.value })}
                   className={`w-full ${inputClass}`}

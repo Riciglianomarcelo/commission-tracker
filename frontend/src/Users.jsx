@@ -27,7 +27,7 @@ export default function Users({ apiBase, getAuthHeader, onAuthError, users, curr
     setSaving(true);
     try {
       const res = await axios.post(`${apiBase}/users`, form, getAuthHeader());
-      setMessage(`Created ${res.data.display_name} — username "${res.data.username}". Share the password with them privately; they can change it after logging in.`);
+      setMessage(`Created ${res.data.display_name}. They log in with username "${res.data.username}" (or ${res.data.email}) and the password "${form.password.trim()}". Send it privately; they can change it after logging in.`);
       setForm({ ...blankUser, role: form.role, location: form.location });
       onChanged();
     } catch (err) {
@@ -56,7 +56,7 @@ export default function Users({ apiBase, getAuthHeader, onAuthError, users, curr
     try {
       if (Object.keys(payload).length) await axios.patch(`${apiBase}/users/${u.id}`, payload, getAuthHeader());
       setEditingId(null);
-      if (payload.new_password) setMessage(`Password reset for ${u.display_name}.`);
+      if (payload.new_password) setMessage(`Password for ${u.display_name} is now "${payload.new_password.trim()}". They log in with username "${u.username}" or ${u.email}.`);
       onChanged();
     } catch (err) {
       fail(err, 'Could not update user');
@@ -85,12 +85,12 @@ export default function Users({ apiBase, getAuthHeader, onAuthError, users, curr
       <div className={card}>
         <h2 className="text-lg font-bold text-ink mb-1 flex items-center gap-2"><UserPlus size={18} /> Add a user</h2>
         <p className="text-sm text-body mb-4">Admissions reps only see and submit their own commissions. Admin and Super Admin review both locations.</p>
-        <form onSubmit={createUser} className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <form onSubmit={createUser} autoComplete="off" className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <label className="text-xs font-semibold text-muted">Full name
             <input className={`w-full mt-1 ${inputClass}`} value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} placeholder="e.g. Ana Pérez" required />
           </label>
           <label className="text-xs font-semibold text-muted">Username (for login)
-            <input className={`w-full mt-1 ${inputClass}`} value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value.trim().toLowerCase() })} placeholder="e.g. ana" autoCapitalize="none" required />
+            <input autoComplete="off" data-lpignore="true" data-1p-ignore className={`w-full mt-1 ${inputClass}`} value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value.trim().toLowerCase() })} placeholder="e.g. ana" autoCapitalize="none" required />
           </label>
           <label className="text-xs font-semibold text-muted">Email
             <input type="email" className={`w-full mt-1 ${inputClass}`} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="ana@4geeksacademy.com" required />
@@ -106,7 +106,7 @@ export default function Users({ apiBase, getAuthHeader, onAuthError, users, curr
             </select>
           </label>
           <label className="text-xs font-semibold text-muted">Temporary password
-            <input type="text" className={`w-full mt-1 ${inputClass}`} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="at least 6 characters" minLength={6} required />
+            <input type="text" autoComplete="off" data-lpignore="true" data-1p-ignore spellCheck={false} className={`w-full mt-1 ${inputClass}`} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="at least 6 characters" minLength={6} required />
           </label>
           <div className="md:col-span-3">
             <button type="submit" disabled={saving} className={primaryBtn}>{saving ? 'Creating…' : 'Create user'}</button>
@@ -155,7 +155,7 @@ export default function Users({ apiBase, getAuthHeader, onAuthError, users, curr
                         </select>
                       </td>
                       <td className="px-3 py-2">
-                        <input type="text" className={`w-40 ${inputClass}`} placeholder="New password (optional)" value={edit.new_password} onChange={(e) => setEdit({ ...edit, new_password: e.target.value })} />
+                        <input type="text" autoComplete="off" data-lpignore="true" data-1p-ignore spellCheck={false} className={`w-40 ${inputClass}`} placeholder="New password (optional)" value={edit.new_password} onChange={(e) => setEdit({ ...edit, new_password: e.target.value })} />
                       </td>
                       <td className="px-3 py-2 text-right whitespace-nowrap pt-4">
                         <button onClick={() => saveEdit(u)} className="text-blue hover:opacity-70 mr-3" title="Save"><Check size={16} /></button>
