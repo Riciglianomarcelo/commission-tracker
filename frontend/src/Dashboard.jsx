@@ -15,6 +15,7 @@ const PAYMENT_LABELS = { cash: 'Paid Cash', financed: 'Financed', other: 'Other'
 
 // Dimensions the breakdown table can be grouped by
 const GROUPS = {
+  rep: { label: 'Rep', key: (r) => r.rep_name || '—' },
   month: { label: 'Commission month', key: (r) => r.month, fmt: monthLabel, sort: 'key' },
   program: { label: 'Program', key: (r) => r.program || '—' },
   type: { label: 'Enrolled vs graduate', key: (r) => (r.is_graduate ? 'Graduate' : 'Enrolled') },
@@ -45,7 +46,9 @@ function aggregate(rows, keyFn) {
   return [...map.values()];
 }
 
-export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
+const STATUS_ORDER = { draft: 0, submitted: 1, approved: 2 };
+
+export default function Dashboard({ apiBase, getAuthHeader, onAuthError, location, repFilter = 'all' }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -57,15 +60,16 @@ export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
   const [payment, setPayment] = useState('all');
   const [status, setStatus] = useState('all');
   const [search, setSearch] = useState('');
+  const [rep, setRep] = useState(repFilter);
 
-  const [groupBy, setGroupBy] = useState('program');
+  const [groupBy, setGroupBy] = useState(repFilter === 'all' ? 'rep' : 'program');
   const [trendMetric, setTrendMetric] = useState('commission');
 
   const load = async () => {
     setLoading(true);
     setError('');
     try {
-      const res = await axios.get(`${apiBase}/dashboard/data`, getAuthHeader());
+      const res = await axios.get(`${apiBase}/dashboard/data?location=${location}`, getAuthHeader());
       setData(res.data);
     } catch (err) {
       if (!onAuthError(err)) setError(err?.response?.data?.detail || 'Could not load dashboard data');
@@ -74,10 +78,25 @@ export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  // New location = new dataset; the rep picker above the tabs also drives the rep filter
+  useEffect(() => { load(); }, [location]);
+  useEffect(() => { setRep(repFilter); }, [repFilter, location]);
 
   const records = data?.records || [];
   const programs = useMemo(() => [...new Set(records.map((r) => r.program).filter(Boolean))].sort(), [records]);
+  const repOptions = useMemo(() => {
+    const m = new Map();
+    records.forEach((r) => { if (r.rep_id) m.set(String(r.rep_id), r.rep_name || `Rep ${r.rep_id}`); });
+    return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [records]);
+
+  // A month is only as far along as its least-advanced rep
+  const monthStatus = (month, rows) => {
+    const repIds = [...new Set(rows.filter((r) => r.month === month).map((r) => r.rep_id))];
+    if (!repIds.length) return 'draft';
+    const statuses = repIds.map((id) => (data?.approvals || []).find((a) => a.month === month && a.rep_id === id)?.status || 'draft');
+    return statuses.reduce((lo, s) => (STATUS_ORDER[s] < STATUS_ORDER[lo] ? s : lo), 'approved');
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -88,9 +107,10 @@ export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
       (type === 'all' || (type === 'graduate') === r.is_graduate) &&
       (payment === 'all' || r.payment_type === payment) &&
       (status === 'all' || r.status === status) &&
+      (rep === 'all' || String(r.rep_id) === String(rep)) &&
       (!q || r.name?.toLowerCase().includes(q) || r.email?.toLowerCase().includes(q))
     );
-  }, [records, fromMonth, toMonth, program, type, payment, status, search]);
+  }, [records, fromMonth, toMonth, program, type, payment, status, search, rep]);
 
   const kpis = useMemo(() => {
     const enrolled = filtered.filter((r) => !r.is_graduate);
@@ -121,21 +141,22 @@ export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
   }, [filtered, groupBy]);
 
   const resetFilters = () => {
-    setFromMonth(''); setToMonth(''); setProgram('all'); setType('all'); setPayment('all'); setStatus('all'); setSearch('');
+    setFromMonth(''); setToMonth(''); setProgram('all'); setType('all'); setPayment('all'); setStatus('all'); setSearch(''); setRep('all');
   };
 
   const exportCSV = () => {
-    const headers = ['Month', 'Name', 'Email', 'Program', 'Type', 'Start Date', 'Graduation Date', 'Tuition', 'Commission %', 'Commission', 'Payment', 'Status', 'Approval'];
+    const headers = ['Location', 'Rep', 'Month', 'Name', 'Email', 'Program', 'Type', 'Start Date', 'Graduation Date', 'Tuition', 'Commission %', 'Commission', 'Payment', 'Status', 'Approval'];
     const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const rows = filtered.map((r) => [
-      r.month, r.name, r.email, r.program, r.is_graduate ? 'Graduate' : 'Enrolled', r.start_date, r.graduation_date,
-      r.tuition_amount, r.commission_percentage, r.commission_amount, r.payment_type, r.status, data?.approvals?.[r.month] || 'draft',
+      r.location, r.rep_name, r.month, r.name, r.email, r.program, r.is_graduate ? 'Graduate' : 'Enrolled', r.start_date, r.graduation_date,
+      r.tuition_amount, r.commission_percentage, r.commission_amount, r.payment_type, r.status,
+      (data?.approvals || []).find((a) => a.month === r.month && a.rep_id === r.rep_id)?.status || 'draft',
     ]);
     const csv = [headers, ...rows].map((row) => row.map(esc).join(',')).join('\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `commission_dashboard_${fromMonth || 'all'}_${toMonth || 'all'}.csv`;
+    a.download = `commission_dashboard_${location}_${fromMonth || 'all'}_${toMonth || 'all'}.csv`;
     a.click();
   };
 
@@ -154,13 +175,19 @@ export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
       {/* Filters */}
       <div className={card}>
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-lg font-bold text-ink">Filters</h2>
+          <h2 className="text-lg font-bold text-ink">{location} · Filters</h2>
           <div className="flex gap-4 text-sm">
             <button onClick={resetFilters} className="font-semibold text-body hover:text-ink">Reset</button>
             <button onClick={load} className="font-semibold text-blue flex items-center gap-1"><RefreshCw size={14} /> Refresh</button>
           </div>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
+          <label className="text-xs font-semibold text-muted">Rep
+            <select value={rep} onChange={(e) => setRep(e.target.value)} className={`w-full mt-1 ${inputClass}`}>
+              <option value="all">All reps</option>
+              {repOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+            </select>
+          </label>
           <label className="text-xs font-semibold text-muted">From month
             <input type="month" value={fromMonth} onChange={(e) => setFromMonth(e.target.value)} className={`w-full mt-1 ${inputClass}`} />
           </label>
@@ -246,7 +273,7 @@ export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
                   : rows.filter((r) => r.is_graduate).reduce((s, r) => s + (trendMetric === 'commission' ? r.commission_amount : r.tuition_amount), 0);
                 const share = trendMetric === 'count' ? gradShare : (total ? gradVal / total : 0);
                 const h = (total / trendMax) * 100;
-                const approval = data.approvals?.[t.key] || 'draft';
+                const approval = monthStatus(t.key, filtered);
                 return (
                   <div key={t.key} className="flex-1 min-w-[44px] flex flex-col items-center justify-end h-full group"
                     title={`${monthLabel(t.key)}: ${METRICS[trendMetric].fmt(total)} (${t.enrolled} enrolled, ${t.graduates} graduates) — ${approval}`}>
@@ -261,7 +288,7 @@ export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
             </div>
             <div className="flex gap-2 mt-2 overflow-x-auto">
               {trend.map((t) => {
-                const approval = data.approvals?.[t.key] || 'draft';
+                const approval = monthStatus(t.key, filtered);
                 return (
                   <div key={t.key} className="flex-1 min-w-[44px] text-center">
                     <p className="text-xs text-ink font-semibold">{monthLabel(t.key)}</p>
@@ -354,7 +381,7 @@ export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-white">
               <tr className="border-b border-border">
-                {['Month', 'Name', 'Program', 'Type', 'Start', 'Tuition', 'Comm. %', 'Commission', 'Payment', 'Status'].map((h) => (
+                {['Month', 'Rep', 'Name', 'Program', 'Type', 'Start', 'Tuition', 'Comm. %', 'Commission', 'Payment', 'Status'].map((h) => (
                   <th key={h} className="text-left px-3 py-2 font-semibold text-ink whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -363,6 +390,7 @@ export default function Dashboard({ apiBase, getAuthHeader, onAuthError }) {
               {[...filtered].sort((a, b) => b.month.localeCompare(a.month) || a.name.localeCompare(b.name)).map((r) => (
                 <tr key={r.id} className="border-b border-border hover:bg-bg-gray">
                   <td className="px-3 py-2 text-body whitespace-nowrap">{monthLabel(r.month)}</td>
+                  <td className="px-3 py-2 text-body whitespace-nowrap">{r.rep_name || '—'}</td>
                   <td className="px-3 py-2 text-ink">{r.name}</td>
                   <td className="px-3 py-2 text-body">{r.program}</td>
                   <td className="px-3 py-2 text-body">{r.is_graduate ? 'Graduate' : 'Enrolled'}</td>

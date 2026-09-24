@@ -6,7 +6,30 @@ class UserCreate(BaseModel):
     email: EmailStr
     username: str
     password: str
-    role: str  # ADMISSIONS_REP, ADMIN, MARCELO
+    role: str = "ADMISSIONS_REP"  # ADMISSIONS_REP, ADMIN, MARCELO
+    full_name: Optional[str] = None
+    location: str = "USA"  # USA, LATAM
+
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+    location: Optional[str] = None
+    is_active: Optional[bool] = None
+    new_password: Optional[str] = None  # set by Marcelo to reset someone's password
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    display_name: str
+    role: str
+    location: Optional[str] = None
+    is_active: bool
+
+    class Config:
+        from_attributes = True
 
 class UserLogin(BaseModel):
     username: str
@@ -33,6 +56,8 @@ class StudentCreate(BaseModel):
     email: Optional[str] = None
     is_graduate: bool = False
     month: str  # YYYY-MM format
+    # Admin/Marcelo must say which rep a record belongs to; reps always own what they add
+    rep_id: Optional[int] = None
 
 class StudentUpdate(BaseModel):
     name: Optional[str] = None
@@ -46,6 +71,8 @@ class StudentUpdate(BaseModel):
     # Commission month (YYYY-MM). Only the super admin (MARCELO) may change it —
     # used to fix records a rep filed under the wrong month.
     month: Optional[str] = None
+    # Reassign to a different admissions rep (Admin/Marcelo); location follows the rep
+    rep_id: Optional[int] = None
 
 class StudentResponse(BaseModel):
     id: int
@@ -61,6 +88,9 @@ class StudentResponse(BaseModel):
     is_graduate: bool
     month: str
     email: Optional[str] = None
+    rep_id: Optional[int] = None
+    rep_name: Optional[str] = None
+    location: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -68,10 +98,14 @@ class StudentResponse(BaseModel):
 
 class ApprovalCreate(BaseModel):
     month: str  # YYYY-MM
+    rep_id: Optional[int] = None  # required when Marcelo approves; ignored when a rep submits
 
 class ApprovalResponse(BaseModel):
     id: int
     month: str
+    rep_id: Optional[int] = None
+    rep_name: Optional[str] = None
+    location: Optional[str] = None
     status: str
     total_commission: float
     rep_submitted_at: Optional[datetime]
@@ -90,6 +124,18 @@ class MonthlyReportResponse(BaseModel):
     total_enrolled_commission: float
     total_graduate_tuition: float
     total_graduate_commission: float
+    total_tuition: float
+    total_commission: float
+    approval_status: str
+    submitted_at: Optional[datetime]
+    approved_at: Optional[datetime]
+
+class RepMonthSummary(BaseModel):
+    rep_id: int
+    rep_name: str
+    location: str
+    enrolled_count: int
+    graduate_count: int
     total_tuition: float
     total_commission: float
     approval_status: str
