@@ -29,6 +29,10 @@ def run_migrations(engine):
         _add_column(conn, insp, "approvals", "rep_id", "INTEGER REFERENCES users(id)")
         _add_column(conn, insp, "approvals", "location", "VARCHAR DEFAULT 'USA'")
 
+        # --- Commission payment status (paid / partial / pending) ---
+        _add_column(conn, insp, "students", "payment_status", "VARCHAR DEFAULT 'pending'")
+        conn.execute(text("UPDATE students SET payment_status = 'pending' WHERE payment_status IS NULL"))
+
         insp = inspect(conn)  # refresh after DDL
 
         # --- Approvals: one per month  ->  one per (month, rep) ---
