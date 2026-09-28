@@ -1,10 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { LogOut, Download, Trash2, Pencil, Check, X, CheckCircle2, Clock, KeyRound, GraduationCap, AlertTriangle } from 'lucide-react';
 import axios from 'axios';
 import './App.css';
 import logo4geeks from './assets/4geeks-logo.svg';
+import Dashboard from './Dashboard.jsx';
+import Users from './Users.jsx';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api/v1';
+const LOCATIONS = ['USA', 'LATAM'];
 
 // FastAPI error bodies aren't always a plain string (422 validation errors come back
 // as an array of {loc, msg, type} objects). Rendering a non-string directly in JSX
@@ -19,9 +22,28 @@ const getErrorMessage = (err, fallback = 'Something went wrong') => {
   return err?.message || fallback;
 };
 
+const fmt = (n) => `$${(n || 0).toFixed(2)}`;
+const readStored = (key, fallback) => {
+  try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
+};
+
+const emptyForm = (isGraduate = false) => ({
+  name: '',
+  program: '',
+  start_date: '',
+  graduation_date: '',
+  tuition_amount: '',
+  commission_percentage: 5,
+  payment_type: 'cash',
+  status: isGraduate ? 'graduated' : 'active',
+  payment_status: 'pending',
+  email: '',
+  rep_id: '',
+});
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(null); // full profile from /auth/me
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('enrolled');
@@ -29,14 +51,26 @@ export default function App() {
 
   const [credentials, setCredentials] = useState({ username: '', password: '' });
   const [students, setStudents] = useState([]);
-  const [reports, setReports] = useState([]);
+  const [report, setReport] = useState(null);
   const [approvals, setApprovals] = useState([]);
-  const [duplicates, setDuplicates] = useState([]);
+  const [repRows, setRepRows] = useState([]); // per-rep status for the month (managers)
+  const [allUsers, setAllUsers] = useState([]);
+  const [duplicates, setDuplicates] = useState([]); // possible double-payment groups (managers)
 
-  // Editing an existing record — only Admin/Marcelo can edit or delete (enforced here and on the backend)
+  const isRep = user?.role === 'ADMISSIONS_REP';
+  // Only Admin/Marcelo can edit or delete (enforced here and on the backend)
   const canManage = user?.role === 'ADMIN' || user?.role === 'MARCELO';
+  // Super admin (Marcelo) can additionally move a record to another month and manage users
+  const isSuperAdmin = user?.role === 'MARCELO';
+
+  // Managers look at one location at a time (USA or LATAM), optionally one rep
+  const [viewLocation, setViewLocation] = useState(() => readStored('viewLocation', 'USA'));
+  const [viewRep, setViewRep] = useState('all');
+
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
+  // Shown after a record is moved out of the month/location being viewed
+  const [notice, setNotice] = useState(null);
 
   // Change password modal — any logged-in user can change their own password
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -45,50 +79,68 @@ export default function App() {
   const [passwordSuccess, setPasswordSuccess] = useState('');
   const [passwordLoading, setPasswordLoading] = useState(false);
 
-  const [formData, setFormData] = useState({
-    name: '',
-    program: '',
-    start_date: '',
-    graduation_date: '',
-    tuition_amount: '',
-    commission_percentage: 5,
-    payment_type: 'cash',
-    status: 'active',
-    payment_status: 'pending',
-    email: '',
-    is_graduate: false,
-  });
+  const [formData, setFormData] = useState(emptyForm());
 
-  // Load token from localStorage
-  useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    const userData = localStorage.getItem('user');
-    if (token && userData) {
-      const parsedUser = JSON.parse(userData);
-      setIsLoggedIn(true);
-      setUser(parsedUser);
-      loadStudents();
-      loadReports();
-      // Duplicate alerts are an Admin/Marcelo oversight view (the backend
-      // enforces this too) — load them up front so the banner can show
-      // without waiting for the Duplicates tab to be clicked.
-      if (parsedUser.role === 'ADMIN' || parsedUser.role === 'MARCELO') loadDuplicates();
-    }
-  }, []);
-
-  // Auto-reload when month changes
-  useEffect(() => {
-    if (isLoggedIn) {
-      loadStudents();
-      loadReports();
-    }
-  }, [currentMonth]);
+  const reps = useMemo(() => allUsers.filter((u) => u.role === 'ADMISSIONS_REP'), [allUsers]);
+  const locationReps = useMemo(() => reps.filter((r) => r.location === viewLocation), [reps, viewLocation]);
+  const activeLocationReps = locationReps.filter((r) => r.is_active);
 
   const getAuthHeader = () => ({
     headers: {
       Authorization: `Bearer ${localStorage.getItem('access_token')}`,
     }
   });
+
+  // Query params that scope data to what a manager is looking at (reps are scoped server-side)
+  const scopeParams = () => {
+    if (!canManage) return '';
+    const p = new URLSearchParams({ location: viewLocation });
+    if (viewRep !== 'all') p.set('rep_id', viewRep);
+    return `&${p.toString()}`;
+  };
+
+  const loadProfile = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/auth/me`, getAuthHeader());
+      setUser(res.data);
+      localStorage.setItem('user', JSON.stringify(res.data));
+      return res.data;
+    } catch (err) {
+      handleAuthError(err);
+      return null;
+    }
+  };
+
+  // Restore session
+  useEffect(() => {
+    const token = localStorage.getItem('access_token');
+    if (token) {
+      setIsLoggedIn(true);
+      loadProfile();
+    }
+  }, []);
+
+  // Load users list for managers (rep pickers, Users tab)
+  useEffect(() => {
+    if (isLoggedIn && canManage) {
+      loadUsers();
+      loadDuplicates();
+    }
+  }, [isLoggedIn, canManage]);
+
+  // Reload whenever what we're looking at changes
+  useEffect(() => {
+    if (isLoggedIn && user) {
+      loadStudents();
+      loadReport();
+      if (canManage) loadRepRows();
+      if (activeTab === 'history') loadApprovals();
+    }
+  }, [currentMonth, viewLocation, viewRep, isLoggedIn, user?.id]);
+
+  useEffect(() => {
+    try { localStorage.setItem('viewLocation', viewLocation); } catch { /* ignore */ }
+  }, [viewLocation]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -97,21 +149,14 @@ export default function App() {
 
     try {
       const response = await axios.post(`${API_BASE}/auth/login`, credentials);
-      const { access_token } = response.data;
-
-      // Decode JWT to get user info
-      const decoded = JSON.parse(atob(access_token.split('.')[1]));
-      const userData = { id: decoded.sub, role: decoded.role };
-
-      localStorage.setItem('access_token', access_token);
-      localStorage.setItem('user', JSON.stringify(userData));
-
-      setUser(userData);
-      setIsLoggedIn(true);
+      localStorage.setItem('access_token', response.data.access_token);
       setCredentials({ username: '', password: '' });
-      loadStudents();
-      loadReports();
-      if (userData.role === 'ADMIN' || userData.role === 'MARCELO') loadDuplicates();
+      const profile = await loadProfile();
+      if (profile) {
+        setIsLoggedIn(true);
+        setActiveTab('enrolled');
+        setViewRep('all');
+      }
     } catch (err) {
       setError(getErrorMessage(err, 'Login failed'));
     } finally {
@@ -125,6 +170,10 @@ export default function App() {
     setIsLoggedIn(false);
     setUser(null);
     setStudents([]);
+    setReport(null);
+    setApprovals([]);
+    setRepRows([]);
+    setAllUsers([]);
   };
 
   // If a request comes back 401 (expired/invalid session), log the user out cleanly
@@ -139,36 +188,55 @@ export default function App() {
     return false;
   };
 
+  const loadUsers = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/users`, getAuthHeader());
+      setAllUsers(res.data);
+    } catch (err) {
+      if (!handleAuthError(err)) console.error('Error loading users:', err);
+    }
+  };
+
   const loadStudents = async () => {
     try {
-      const response = await axios.get(`${API_BASE}/students?month=${currentMonth}`, getAuthHeader());
+      const response = await axios.get(`${API_BASE}/students?month=${currentMonth}${scopeParams()}`, getAuthHeader());
       setStudents(response.data);
     } catch (err) {
       if (!handleAuthError(err)) console.error('Error loading students:', err);
     }
   };
 
-  const loadReports = async () => {
+  const loadReport = async () => {
     try {
-      const response = await axios.get(`${API_BASE}/reports/monthly/${currentMonth}`, getAuthHeader());
-      setReports([response.data]);
+      const qs = scopeParams().replace(/^&/, '?');
+      const response = await axios.get(`${API_BASE}/reports/monthly/${currentMonth}${qs}`, getAuthHeader());
+      setReport(response.data);
     } catch (err) {
       if (!handleAuthError(err)) console.error('Error loading reports:', err);
     }
   };
 
+  const loadRepRows = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/approvals/month/${currentMonth}?location=${viewLocation}`, getAuthHeader());
+      setRepRows(res.data);
+    } catch (err) {
+      if (!handleAuthError(err)) console.error('Error loading rep approvals:', err);
+    }
+  };
+
   const loadApprovals = async () => {
     try {
-      const response = await axios.get(`${API_BASE}/approvals/history`, getAuthHeader());
+      const qs = canManage ? `?location=${viewLocation}` : '';
+      const response = await axios.get(`${API_BASE}/approvals/history${qs}`, getAuthHeader());
       setApprovals(response.data);
     } catch (err) {
       if (!handleAuthError(err)) console.error('Error loading approvals:', err);
     }
   };
 
-  // Students who appear more than once across different months (matched by email,
-  // or by name when there's no email) — the scenario that risks a duplicate/double
-  // commission payment. Admin/Marcelo only, enforced on the backend as well.
+  // Possible double-payment groups — same student (by email, or by name) showing up
+  // more than once across months. Admin/Marcelo only; spans every rep and location.
   const loadDuplicates = async () => {
     try {
       const response = await axios.get(`${API_BASE}/students/duplicates`, getAuthHeader());
@@ -178,14 +246,34 @@ export default function App() {
     }
   };
 
-  const handleAddStudent = async (e) => {
+  const refreshAll = () => {
+    loadStudents();
+    loadReport();
+    if (canManage) {
+      loadRepRows();
+      loadDuplicates();
+    }
+  };
+
+  // For managers adding a record: the rep being viewed, or the only rep in the location
+  const defaultRepId = () => (viewRep !== 'all' ? viewRep : activeLocationReps.length === 1 ? String(activeLocationReps[0].id) : '');
+
+  const handleAddStudent = async (e, isGraduate) => {
     e.preventDefault();
-    setLoading(true);
     setError('');
 
+    const repId = canManage ? (formData.rep_id || defaultRepId()) : null;
+    if (canManage && !repId) {
+      setError('Choose which admissions rep this record belongs to.');
+      return;
+    }
+
+    setLoading(true);
     try {
+      const { rep_id, ...rest } = formData;
       const payload = {
-        ...formData,
+        ...rest,
+        is_graduate: isGraduate,
         month: currentMonth,
         tuition_amount: parseFloat(formData.tuition_amount),
         commission_percentage: parseFloat(formData.commission_percentage),
@@ -193,27 +281,13 @@ export default function App() {
         // all, but an empty string from the untouched input is neither, so it must
         // be converted to null before it ever reaches the API.
         graduation_date: formData.graduation_date || null,
+        email: formData.email || null,
+        ...(canManage ? { rep_id: Number(repId) } : {}),
       };
 
       await axios.post(`${API_BASE}/students`, payload, getAuthHeader());
-
-      setFormData({
-        name: '',
-        program: '',
-        start_date: '',
-        graduation_date: '',
-        tuition_amount: '',
-        commission_percentage: 5,
-        payment_type: 'cash',
-        status: 'active',
-        payment_status: 'pending',
-        email: '',
-        is_graduate: activeTab === 'graduates',
-      });
-
-      loadStudents();
-      loadReports();
-      if (canManage) loadDuplicates();
+      setFormData({ ...emptyForm(isGraduate), rep_id: formData.rep_id });
+      refreshAll();
     } catch (err) {
       if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error adding student'));
     } finally {
@@ -273,9 +347,7 @@ export default function App() {
 
     try {
       await axios.patch(`${API_BASE}/students/${student.id}`, { is_graduate: true, status: 'graduated' }, getAuthHeader());
-      loadStudents();
-      loadReports();
-      if (canManage) loadDuplicates();
+      refreshAll();
     } catch (err) {
       if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error marking student as graduate'));
     }
@@ -286,9 +358,7 @@ export default function App() {
 
     try {
       await axios.delete(`${API_BASE}/students/${id}`, getAuthHeader());
-      loadStudents();
-      loadReports();
-      if (canManage) loadDuplicates();
+      refreshAll();
     } catch (err) {
       if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error deleting student'));
     }
@@ -305,6 +375,8 @@ export default function App() {
       status: student.status,
       payment_status: student.payment_status || 'pending',
       graduation_date: student.graduation_date || '',
+      month: student.month,
+      rep_id: student.rep_id ? String(student.rep_id) : '',
     });
   };
 
@@ -315,20 +387,32 @@ export default function App() {
 
   const saveEdit = async (id) => {
     setError('');
+    setNotice(null);
     try {
+      const student = students.find((s) => s.id === id);
+      const movedTo = isSuperAdmin && editForm.month && editForm.month !== student?.month ? editForm.month : null;
+      const newRep = editForm.rep_id && Number(editForm.rep_id) !== student?.rep_id ? Number(editForm.rep_id) : null;
+      const { month, rep_id, ...rest } = editForm;
       const payload = {
-        ...editForm,
+        ...rest,
+        ...(movedTo ? { month: movedTo } : {}),
+        ...(newRep ? { rep_id: newRep } : {}),
         tuition_amount: parseFloat(editForm.tuition_amount),
         commission_percentage: parseFloat(editForm.commission_percentage),
         // Same rule as adding a student: an untouched date input is an empty
         // string, which the backend rejects — send null instead when it's blank.
         graduation_date: editForm.graduation_date || null,
       };
-      await axios.patch(`${API_BASE}/students/${id}`, payload, getAuthHeader());
+      const res = await axios.patch(`${API_BASE}/students/${id}`, payload, getAuthHeader());
+      const parts = [];
+      if (movedTo) parts.push(`from ${student.month} to ${movedTo}`);
+      if (newRep) parts.push(`to ${res.data.rep_name} (${res.data.location})`);
+      if (parts.length) {
+        const leftLocation = newRep && res.data.location !== viewLocation ? res.data.location : null;
+        setNotice({ text: `${student.name} was moved ${parts.join(' and ')}.`, month: movedTo, location: leftLocation });
+      }
       cancelEdit();
-      loadStudents();
-      loadReports();
-      if (canManage) loadDuplicates();
+      refreshAll();
     } catch (err) {
       if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error updating student'));
     }
@@ -340,7 +424,7 @@ export default function App() {
 
     try {
       await axios.post(`${API_BASE}/approvals/submit`, { month: currentMonth }, getAuthHeader());
-      loadReports();
+      loadReport();
       loadApprovals();
       alert(`Submitted for approval: ${currentMonth}`);
     } catch (err) {
@@ -350,15 +434,16 @@ export default function App() {
     }
   };
 
-  const handleApprove = async () => {
+  const handleApprove = async (row) => {
+    if (!confirm(`Approve ${row.rep_name}'s commission for ${currentMonth} (${fmt(row.total_commission)})?`)) return;
     setLoading(true);
     setError('');
 
     try {
-      await axios.post(`${API_BASE}/approvals/approve`, { month: currentMonth }, getAuthHeader());
-      loadReports();
+      await axios.post(`${API_BASE}/approvals/approve`, { month: currentMonth, rep_id: row.rep_id }, getAuthHeader());
+      loadReport();
+      loadRepRows();
       loadApprovals();
-      alert(`Approved: ${currentMonth}`);
     } catch (err) {
       if (!handleAuthError(err)) setError(getErrorMessage(err, 'Error approving'));
     } finally {
@@ -367,24 +452,29 @@ export default function App() {
   };
 
   const exportCSV = () => {
-    const headers = ['Name', 'Program', 'Start Date', 'Tuition', 'Commission %', 'Commission', 'Status', 'Type'];
+    const headers = ['Rep', 'Location', 'Name', 'Program', 'Start Date', 'Tuition', 'Commission %', 'Commission', 'Status', 'Type'];
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const rows = students.map(s => [
+      s.rep_name,
+      s.location,
       s.name,
       s.program,
       s.start_date,
-      `$${s.tuition_amount.toFixed(2)}`,
-      `${s.commission_percentage}%`,
-      `$${s.commission_amount.toFixed(2)}`,
+      s.tuition_amount.toFixed(2),
+      s.commission_percentage,
+      s.commission_amount.toFixed(2),
       s.status,
       s.is_graduate ? 'Graduate' : 'Enrolled',
     ]);
 
-    const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+    const csv = [headers, ...rows].map(r => r.map(esc).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `commission_${currentMonth}.csv`;
+    const repSlug = viewRep !== 'all' ? `_${reps.find((r) => String(r.id) === viewRep)?.username || viewRep}` : '';
+    const scope = canManage ? `_${viewLocation}${repSlug}` : `_${user?.username || ''}`;
+    a.download = `commission_${currentMonth}${scope}.csv`;
     a.click();
   };
 
@@ -409,12 +499,15 @@ export default function App() {
 
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
-                <label className="block text-sm font-semibold text-ink mb-2">Username</label>
+                <label className="block text-sm font-semibold text-ink mb-2">Username or email</label>
                 <input
                   type="text"
+                  name="username"
+                  autoComplete="username"
                   value={credentials.username}
-                  onChange={(e) => setCredentials({ ...credentials, username: e.target.value })}
+                  onChange={(e) => setCredentials({ ...credentials, username: e.target.value.trim().toLowerCase() })}
                   className={`w-full ${inputClass}`}
+                  autoCapitalize="none"
                   required
                 />
               </div>
@@ -423,6 +516,8 @@ export default function App() {
                 <label className="block text-sm font-semibold text-ink mb-2">Password</label>
                 <input
                   type="password"
+                  name="password"
+                  autoComplete="current-password"
                   value={credentials.password}
                   onChange={(e) => setCredentials({ ...credentials, password: e.target.value })}
                   className={`w-full ${inputClass}`}
@@ -430,11 +525,7 @@ export default function App() {
                 />
               </div>
 
-              <button
-                type="submit"
-                disabled={loading}
-                className={`w-full ${primaryBtn}`}
-              >
+              <button type="submit" disabled={loading} className={`w-full ${primaryBtn}`}>
                 {loading ? 'Signing in...' : 'Log in'}
               </button>
             </form>
@@ -446,13 +537,321 @@ export default function App() {
 
   const enrolled = students.filter(s => !s.is_graduate);
   const graduates = students.filter(s => s.is_graduate);
-  const report = reports[0];
+  const showRepColumn = canManage && viewRep === 'all';
+  const viewedRepName = viewRep !== 'all' ? reps.find((r) => String(r.id) === viewRep)?.display_name : null;
+  const roleLabel = { ADMISSIONS_REP: 'Admissions Rep', ADMIN: 'Admin', MARCELO: 'Super Admin' }[user?.role] || user?.role;
+
+  const tabs = [
+    'enrolled', 'graduates', 'summary', 'history',
+    ...(canManage ? ['dashboard', 'duplicates'] : []),
+    ...(isSuperAdmin ? ['users'] : []),
+  ];
+  const tabLabels = { enrolled: 'Enrolled Students', graduates: 'Graduates', summary: 'Summary', history: 'History', dashboard: 'Dashboard', duplicates: 'Duplicates', users: 'Users' };
+
+  const statusBadge = (status) => (
+    <span className={`px-2.5 py-1 rounded-pill text-xs font-semibold ${
+      status === 'approved' ? 'bg-green-100 text-green-700' :
+      status === 'submitted' ? 'bg-amber-soft text-amber' :
+      'bg-bg-gray text-body'
+    }`}>
+      {status}
+    </span>
+  );
+
+  const paymentBadge = (paymentStatus) => (
+    <span className={`px-2.5 py-1 rounded-pill text-xs font-semibold ${
+      paymentStatus === 'paid' ? 'bg-green-100 text-green-700' :
+      paymentStatus === 'partial' ? 'bg-amber-soft text-amber' :
+      'bg-bg-gray text-body'
+    }`}>
+      {paymentStatus || 'pending'}
+    </span>
+  );
+
+  // ---------- Add form (shared by Enrolled and Graduates) ----------
+  const renderAddForm = (isGraduate) => (
+    <div className="bg-white rounded-card border border-border shadow-card p-6">
+      <h2 className="text-lg font-bold text-ink mb-4">{isGraduate ? 'Add Graduate' : 'Add Enrolled Student'}</h2>
+      <form onSubmit={(e) => handleAddStudent(e, isGraduate)} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {canManage && (
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-muted mb-1.5">Admissions rep ({viewLocation})</label>
+            <select
+              value={formData.rep_id || defaultRepId()}
+              onChange={(e) => setFormData({ ...formData, rep_id: e.target.value })}
+              className={`w-full ${inputClass}`}
+              required
+            >
+              <option value="">Choose a rep…</option>
+              {activeLocationReps.map((r) => <option key={r.id} value={r.id}>{r.display_name}</option>)}
+            </select>
+          </div>
+        )}
+        <input
+          type="text"
+          placeholder="Name"
+          value={formData.name}
+          onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+          className={inputClass}
+          required
+        />
+        <input
+          type="text"
+          placeholder={isGraduate ? 'Program' : 'Program (e.g., ft-ai-engineering-4)'}
+          value={formData.program}
+          onChange={(e) => setFormData({ ...formData, program: e.target.value })}
+          className={inputClass}
+          required
+        />
+        <input
+          type="email"
+          placeholder={isGraduate ? 'Email' : 'Email (for duplicate prevention)'}
+          value={formData.email}
+          onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+          className={inputClass}
+        />
+        <div>
+          <label className="block text-xs font-semibold text-muted mb-1.5">Start Date</label>
+          <input
+            type="date"
+            value={formData.start_date}
+            onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
+            className={`w-full ${inputClass}`}
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-semibold text-muted mb-1.5">{isGraduate ? 'Graduation Date' : 'Expected Graduation Date (optional)'}</label>
+          <input
+            type="date"
+            value={formData.graduation_date}
+            onChange={(e) => setFormData({ ...formData, graduation_date: e.target.value })}
+            className={`w-full ${inputClass}`}
+            required={isGraduate}
+          />
+        </div>
+        <input
+          type="number"
+          step="0.01"
+          placeholder="Tuition Amount"
+          value={formData.tuition_amount}
+          onChange={(e) => setFormData({ ...formData, tuition_amount: e.target.value })}
+          className={inputClass}
+          required
+        />
+        <input
+          type="number"
+          step="0.01"
+          placeholder="Commission %"
+          value={formData.commission_percentage}
+          onChange={(e) => setFormData({ ...formData, commission_percentage: e.target.value })}
+          className={inputClass}
+          required
+        />
+        <select
+          value={formData.payment_type}
+          onChange={(e) => setFormData({ ...formData, payment_type: e.target.value })}
+          className={inputClass}
+        >
+          <option value="cash">Paid Cash</option>
+          <option value="financed">Financed</option>
+          <option value="other">Other</option>
+        </select>
+        <div>
+          <label className="block text-xs font-semibold text-muted mb-1.5">Commission Payment Status</label>
+          <select
+            value={formData.payment_status}
+            onChange={(e) => setFormData({ ...formData, payment_status: e.target.value })}
+            className={`w-full ${inputClass}`}
+          >
+            <option value="pending">Pending</option>
+            <option value="partial">Partial</option>
+            <option value="paid">Paid</option>
+          </select>
+        </div>
+
+        <button type="submit" disabled={loading} className={`md:col-span-2 ${primaryBtn}`}>
+          {loading ? 'Adding...' : isGraduate ? '+ Add Graduate' : '+ Add Student'}
+        </button>
+      </form>
+    </div>
+  );
+
+  // ---------- Records table (shared by Enrolled and Graduates) ----------
+  const renderTable = (rows, isGraduate) => (
+    <div className="bg-white rounded-card border border-border shadow-card p-6">
+      <h2 className="text-lg font-bold text-ink mb-4 flex items-center gap-2">
+        {isGraduate ? 'Graduates' : 'Enrolled Students'}
+        <span className="text-xs bg-blue-soft text-blue px-2.5 py-1 rounded-pill font-semibold">{rows.length}</span>
+      </h2>
+      {rows.length === 0 ? (
+        <p className="text-muted text-center py-8 text-sm">{isGraduate ? 'No graduates yet' : 'No enrolled students yet'}</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border">
+                {showRepColumn && <th className="text-left px-4 py-2 font-semibold text-ink">Rep</th>}
+                <th className="text-left px-4 py-2 font-semibold text-ink">Name</th>
+                <th className="text-left px-4 py-2 font-semibold text-ink">Program</th>
+                <th className="text-left px-4 py-2 font-semibold text-ink">{isGraduate ? 'Grad Date' : 'Expected Graduation'}</th>
+                <th className="text-left px-4 py-2 font-semibold text-ink">Tuition</th>
+                <th className="text-left px-4 py-2 font-semibold text-ink">Commission</th>
+                <th className="text-left px-4 py-2 font-semibold text-ink">Payment</th>
+                {!isGraduate && <th className="text-left px-4 py-2 font-semibold text-ink">Status</th>}
+                <th className="text-center px-4 py-2 font-semibold text-ink">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(student => (
+                editingId === student.id ? (
+                  <tr key={student.id} className="border-b border-border bg-blue-tint align-top">
+                    {showRepColumn && <td className="px-4 py-2 text-body text-xs pt-5">{student.rep_name}</td>}
+                    <td className="px-4 py-2">
+                      <input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} className={`w-full ${inputClass}`} />
+                      {isSuperAdmin && (
+                        <label className="block mt-2">
+                          <span className="block text-[11px] font-semibold text-muted mb-1">Commission month</span>
+                          <input type="month" value={editForm.month} onChange={(e) => setEditForm({ ...editForm, month: e.target.value })} className={`w-full ${inputClass}`} />
+                        </label>
+                      )}
+                      <label className="block mt-2">
+                        <span className="block text-[11px] font-semibold text-muted mb-1">Rep</span>
+                        <select value={editForm.rep_id} onChange={(e) => setEditForm({ ...editForm, rep_id: e.target.value })} className={`w-full ${inputClass}`}>
+                          {LOCATIONS.map((loc) => (
+                            <optgroup key={loc} label={loc}>
+                              {reps.filter((r) => r.location === loc && (r.is_active || String(r.id) === editForm.rep_id)).map((r) => (
+                                <option key={r.id} value={r.id}>{r.display_name}</option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                      </label>
+                    </td>
+                    <td className="px-4 py-2">
+                      <input value={editForm.program} onChange={(e) => setEditForm({ ...editForm, program: e.target.value })} className={`w-full ${inputClass}`} />
+                    </td>
+                    <td className="px-4 py-2">
+                      <input type="date" value={editForm.graduation_date} onChange={(e) => setEditForm({ ...editForm, graduation_date: e.target.value })} className={`w-full ${inputClass}`} />
+                    </td>
+                    <td className="px-4 py-2">
+                      <input type="number" step="0.01" value={editForm.tuition_amount} onChange={(e) => setEditForm({ ...editForm, tuition_amount: e.target.value })} className={`w-full ${inputClass}`} />
+                    </td>
+                    <td className="px-4 py-2">
+                      <input type="number" step="0.01" value={editForm.commission_percentage} onChange={(e) => setEditForm({ ...editForm, commission_percentage: e.target.value })} className={`w-24 ${inputClass}`} />
+                      <span className="text-xs text-muted ml-1">%</span>
+                    </td>
+                    <td className="px-4 py-2">
+                      <select value={editForm.payment_status} onChange={(e) => setEditForm({ ...editForm, payment_status: e.target.value })} className={inputClass}>
+                        <option value="pending">Pending</option>
+                        <option value="partial">Partial</option>
+                        <option value="paid">Paid</option>
+                      </select>
+                    </td>
+                    {!isGraduate && (
+                      <td className="px-4 py-2">
+                        <select value={editForm.status} onChange={(e) => setEditForm({ ...editForm, status: e.target.value })} className={inputClass}>
+                          <option value="active">Active</option>
+                          <option value="graduated">Graduated</option>
+                          <option value="dropped">Dropped</option>
+                          <option value="pending">Pending</option>
+                        </select>
+                      </td>
+                    )}
+                    <td className="px-4 py-3 text-center whitespace-nowrap pt-5">
+                      <button onClick={() => saveEdit(student.id)} className="text-blue hover:opacity-70 transition mr-3" title="Save"><Check size={16} /></button>
+                      <button onClick={cancelEdit} className="text-muted hover:opacity-70 transition" title="Cancel"><X size={16} /></button>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={student.id} className="border-b border-border hover:bg-bg-gray">
+                    {showRepColumn && <td className="px-4 py-3 text-body">{student.rep_name || '—'}</td>}
+                    <td className="px-4 py-3 text-ink">{student.name}</td>
+                    <td className="px-4 py-3 text-body">{student.program}</td>
+                    <td className="px-4 py-3 text-body">{student.graduation_date || '—'}</td>
+                    <td className="px-4 py-3 font-semibold text-ink">{fmt(student.tuition_amount)}</td>
+                    <td className="px-4 py-3 font-semibold text-blue">{fmt(student.commission_amount)}</td>
+                    <td className="px-4 py-3">{paymentBadge(student.payment_status)}</td>
+                    {!isGraduate && (
+                      <td className="px-4 py-3">
+                        <span className={`px-2.5 py-1 rounded-pill text-xs font-semibold ${
+                          student.status === 'active' ? 'bg-green-100 text-green-700' :
+                          student.status === 'graduated' ? 'bg-blue-soft text-blue' :
+                          'bg-red-soft text-red'
+                        }`}>
+                          {student.status}
+                        </span>
+                      </td>
+                    )}
+                    <td className="px-4 py-3 text-center whitespace-nowrap">
+                      {canManage ? (
+                        <>
+                          {!isGraduate && (
+                            <button onClick={() => handleMarkGraduate(student)} className="text-blue hover:opacity-70 transition mr-3" title="Mark as Graduate">
+                              <GraduationCap size={16} />
+                            </button>
+                          )}
+                          <button onClick={() => startEdit(student)} className="text-blue hover:opacity-70 transition mr-3" title="Edit">
+                            <Pencil size={16} />
+                          </button>
+                          <button onClick={() => handleDeleteStudent(student.id)} className="text-red hover:opacity-70 transition" title="Delete">
+                            <Trash2 size={16} />
+                          </button>
+                        </>
+                      ) : (
+                        <span className="text-xs text-muted">—</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+
+  const summaryCards = report && (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="bg-white rounded-card border border-border shadow-card p-6">
+        <p className="text-xs text-muted font-semibold uppercase tracking-wide mb-2">Total Enrolled Students</p>
+        <p className="text-3xl font-extrabold text-ink">{report.enrolled_count}</p>
+      </div>
+      <div className="bg-white rounded-card border border-border shadow-card p-6">
+        <p className="text-xs text-muted font-semibold uppercase tracking-wide mb-2">Total Graduates</p>
+        <p className="text-3xl font-extrabold text-ink">{report.graduate_count}</p>
+      </div>
+      <div className="bg-white rounded-card border border-border shadow-card p-6">
+        <p className="text-xs text-muted font-semibold uppercase tracking-wide mb-2">Enrolled Tuition</p>
+        <p className="text-3xl font-extrabold text-ink">{fmt(report.total_enrolled_tuition)}</p>
+      </div>
+      <div className="bg-blue-soft rounded-card p-6">
+        <p className="text-xs text-blue font-semibold uppercase tracking-wide mb-2">Enrolled Commission</p>
+        <p className="text-3xl font-extrabold text-blue">{fmt(report.total_enrolled_commission)}</p>
+      </div>
+      <div className="bg-white rounded-card border border-border shadow-card p-6">
+        <p className="text-xs text-muted font-semibold uppercase tracking-wide mb-2">Graduate Tuition</p>
+        <p className="text-3xl font-extrabold text-ink">{fmt(report.total_graduate_tuition)}</p>
+      </div>
+      <div className="bg-blue-soft rounded-card p-6">
+        <p className="text-xs text-blue font-semibold uppercase tracking-wide mb-2">Graduate Commission</p>
+        <p className="text-3xl font-extrabold text-blue">{fmt(report.total_graduate_commission)}</p>
+      </div>
+      <div className="md:col-span-2 bg-blue rounded-card p-6">
+        <p className="text-xs text-white/80 font-semibold uppercase tracking-wide mb-2">
+          Total Commission{canManage ? ` — ${viewLocation}${viewedRepName ? ` · ${viewedRepName}` : ''}` : ''}
+        </p>
+        <p className="text-4xl font-extrabold text-white">{fmt(report.total_commission)}</p>
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-bg-gray">
       {/* Header */}
       <header className="bg-white border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 py-5 flex justify-between items-center">
+        <div className="max-w-7xl mx-auto px-6 py-5 flex justify-between items-center gap-4">
           <div>
             <img src={logo4geeks} alt="4Geeks Academy" className="h-5 mb-2" />
             <h1 className="text-2xl font-extrabold text-ink">Commission Tracker</h1>
@@ -460,21 +859,16 @@ export default function App() {
           <div className="flex items-center gap-4">
             <div className="text-right hidden sm:block">
               <p className="text-xs text-muted">Logged in as</p>
-              <p className="font-semibold text-ink capitalize text-sm">{user?.role?.replace('_', ' ')}</p>
+              <p className="font-semibold text-ink text-sm">{user?.display_name || user?.username}</p>
+              <p className="text-xs text-body">{roleLabel}{isRep ? ` · ${user?.location}` : ''}</p>
             </div>
-            <button
-              onClick={openPasswordModal}
-              className={`${secondaryBtn} flex items-center gap-2 !py-2 !px-4`}
-            >
+            <button onClick={openPasswordModal} className={`${secondaryBtn} flex items-center gap-2 !py-2 !px-4`} title="Change Password">
               <KeyRound size={16} />
-              Change Password
+              <span className="hidden md:inline">Change Password</span>
             </button>
-            <button
-              onClick={handleLogout}
-              className={`${secondaryBtn} flex items-center gap-2 !py-2 !px-4`}
-            >
+            <button onClick={handleLogout} className={`${secondaryBtn} flex items-center gap-2 !py-2 !px-4`} title="Logout">
               <LogOut size={16} />
-              Logout
+              <span className="hidden md:inline">Logout</span>
             </button>
           </div>
         </div>
@@ -531,18 +925,8 @@ export default function App() {
               </div>
 
               <div className="flex gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={closePasswordModal}
-                  className={`flex-1 ${secondaryBtn}`}
-                >
-                  Close
-                </button>
-                <button
-                  type="submit"
-                  disabled={passwordLoading}
-                  className={`flex-1 ${primaryBtn}`}
-                >
+                <button type="button" onClick={closePasswordModal} className={`flex-1 ${secondaryBtn}`}>Close</button>
+                <button type="submit" disabled={passwordLoading} className={`flex-1 ${primaryBtn}`}>
                   {passwordLoading ? 'Saving...' : 'Save'}
                 </button>
               </div>
@@ -552,28 +936,64 @@ export default function App() {
       )}
 
       <div className="max-w-7xl mx-auto px-6 py-8">
-        {/* Month Selector */}
-        <div className="bg-white rounded-card border border-border shadow-card p-4 mb-6 flex flex-wrap gap-4 justify-between items-center">
-          <div className="flex items-center gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-muted mb-1">Commission Month</label>
-              <input
-                type="month"
-                value={currentMonth}
-                onChange={(e) => setCurrentMonth(e.target.value)}
-                className={inputClass}
-              />
+        {/* Location switch — managers see USA and LATAM separately */}
+        {canManage && activeTab !== 'users' && activeTab !== 'duplicates' && (
+          <div className="flex flex-wrap items-center gap-3 mb-4">
+            <div className="flex bg-white border border-border rounded-pill p-1 shadow-card" role="tablist" aria-label="Location">
+              {LOCATIONS.map((loc) => (
+                <button
+                  key={loc}
+                  role="tab"
+                  aria-selected={viewLocation === loc}
+                  onClick={() => { setViewLocation(loc); setViewRep('all'); setFormData((f) => ({ ...f, rep_id: '' })); }}
+                  className={`px-6 py-2 text-sm font-bold rounded-pill transition ${viewLocation === loc ? 'bg-blue text-white' : 'text-body hover:text-ink'}`}
+                >
+                  {loc}
+                </button>
+              ))}
             </div>
-            <p className="text-xs text-body max-w-xs hidden md:block">New students you add are recorded against this month for commission reporting.</p>
+            <select
+              value={viewRep}
+              onChange={(e) => { setViewRep(e.target.value); setFormData((f) => ({ ...f, rep_id: '' })); }}
+              className={`${inputClass} !py-2 bg-white`}
+              aria-label="Rep"
+            >
+              <option value="all">All {viewLocation} reps</option>
+              {locationReps.map((r) => (
+                <option key={r.id} value={r.id}>{r.display_name}{r.is_active ? '' : ' (inactive)'}</option>
+              ))}
+            </select>
+            {locationReps.length === 0 && (
+              <span className="text-xs text-body">No {viewLocation} reps yet{isSuperAdmin ? ' — add them in the Users tab.' : '.'}</span>
+            )}
           </div>
-          <button
-            onClick={exportCSV}
-            className={`${secondaryBtn} flex items-center gap-2 !py-2 !px-4`}
-          >
-            <Download size={16} />
-            Export CSV
-          </button>
-        </div>
+        )}
+
+        {/* Month Selector */}
+        {activeTab !== 'dashboard' && activeTab !== 'users' && activeTab !== 'duplicates' && (
+          <div className="bg-white rounded-card border border-border shadow-card p-4 mb-6 flex flex-wrap gap-4 justify-between items-center">
+            <div className="flex items-center gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1">Commission Month</label>
+                <input
+                  type="month"
+                  value={currentMonth}
+                  onChange={(e) => setCurrentMonth(e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+              <p className="text-xs text-body max-w-xs hidden md:block">
+                {isRep
+                  ? 'Students you add are recorded against this month for your commission.'
+                  : 'New students you add are recorded against this month for commission reporting.'}
+              </p>
+            </div>
+            <button onClick={exportCSV} className={`${secondaryBtn} flex items-center gap-2 !py-2 !px-4`}>
+              <Download size={16} />
+              Export CSV
+            </button>
+          </div>
+        )}
 
         {/* Error Message */}
         {error && (
@@ -583,486 +1003,88 @@ export default function App() {
           </div>
         )}
 
-        {/* Duplicate Alert Banner — Admin/Marcelo only, shown from any tab */}
-        {canManage && duplicates.length > 0 && activeTab !== 'duplicates' && (
-          <div className="bg-red-soft border border-red/20 text-red px-4 py-3 rounded-[10px] mb-4 text-sm flex justify-between items-center">
-            <span className="flex items-center gap-2">
-              <AlertTriangle size={16} />
-              {duplicates.length} potential duplicate student{duplicates.length > 1 ? 's' : ''} found — possible double commission payment.
+        {notice && (
+          <div className="bg-blue-soft border border-blue/20 text-ink px-4 py-3 rounded-[10px] mb-4 text-sm flex justify-between items-center gap-4">
+            <span>{notice.text}</span>
+            <span className="flex items-center gap-4 whitespace-nowrap">
+              {(notice.month || notice.location) && (
+                <button
+                  onClick={() => {
+                    if (notice.month) setCurrentMonth(notice.month);
+                    if (notice.location) { setViewLocation(notice.location); setViewRep('all'); }
+                    setNotice(null);
+                  }}
+                  className="font-semibold text-blue"
+                >
+                  Go to {[notice.location, notice.month].filter(Boolean).join(' · ')}
+                </button>
+              )}
+              <button onClick={() => setNotice(null)} className="font-semibold">✕</button>
             </span>
-            <button onClick={() => setActiveTab('duplicates')} className="font-semibold underline whitespace-nowrap ml-4">
-              Review
-            </button>
           </div>
         )}
 
         {/* Tabs */}
-        <div className="flex gap-2 mb-6 border-b border-border">
-          {[...['enrolled', 'graduates', 'summary', 'history'], ...(canManage ? ['duplicates'] : [])].map(tab => (
+        <div className="flex gap-2 mb-6 border-b border-border overflow-x-auto">
+          {tabs.map(tab => (
             <button
               key={tab}
               onClick={() => {
                 setActiveTab(tab);
                 if (tab === 'history') loadApprovals();
+                if (tab === 'summary' && canManage) loadRepRows();
+                if (tab === 'users') loadUsers();
                 if (tab === 'duplicates') loadDuplicates();
               }}
-              className={`px-5 py-3 text-sm font-semibold border-b-2 transition capitalize flex items-center gap-1.5 ${
+              className={`px-5 py-3 text-sm font-semibold border-b-2 transition whitespace-nowrap flex items-center gap-2 ${
                 activeTab === tab
                   ? 'border-blue text-blue'
                   : 'border-transparent text-body hover:text-ink'
               }`}
             >
-              {tab === 'enrolled' && 'Enrolled Students'}
-              {tab === 'graduates' && 'Graduates'}
-              {tab === 'summary' && 'Summary'}
-              {tab === 'history' && 'History'}
-              {tab === 'duplicates' && (
-                <>
-                  Duplicates
-                  {duplicates.length > 0 && (
-                    <span className="text-xs bg-red text-white px-1.5 py-0.5 rounded-pill font-semibold">{duplicates.length}</span>
-                  )}
-                </>
+              {tabLabels[tab]}
+              {tab === 'duplicates' && duplicates.length > 0 && (
+                <span className="text-xs bg-red text-white px-2 py-0.5 rounded-pill font-bold">{duplicates.length}</span>
               )}
             </button>
           ))}
         </div>
 
+        {/* Possible double-payment banner — visible on any tab so it can't be missed */}
+        {canManage && activeTab !== 'duplicates' && duplicates.length > 0 && (
+          <div className="bg-red-soft border border-red/20 text-red px-4 py-3 rounded-[10px] mb-6 text-sm flex items-center gap-3">
+            <AlertTriangle size={18} className="shrink-0" />
+            <span>
+              {duplicates.length} student{duplicates.length === 1 ? '' : 's'} appear more than once across months — possible double commission payment.
+            </span>
+            <button
+              onClick={() => { setActiveTab('duplicates'); loadDuplicates(); }}
+              className="font-semibold underline shrink-0 ml-auto"
+            >
+              Review
+            </button>
+          </div>
+        )}
+
         {/* Enrolled Tab */}
         {activeTab === 'enrolled' && (
           <div className="space-y-6">
-            {/* Add Form */}
-            <div className="bg-white rounded-card border border-border shadow-card p-6">
-              <h2 className="text-lg font-bold text-ink mb-4">Add Enrolled Student</h2>
-              <form onSubmit={handleAddStudent} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <input
-                  type="text"
-                  placeholder="Name"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <input
-                  type="text"
-                  placeholder="Program (e.g., ft-ai-engineering-4)"
-                  value={formData.program}
-                  onChange={(e) => setFormData({ ...formData, program: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <input
-                  type="email"
-                  placeholder="Email (for duplicate prevention)"
-                  value={formData.email}
-                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                  className={inputClass}
-                />
-                <div>
-                  <label className="block text-xs font-semibold text-muted mb-1.5">Start Date</label>
-                  <input
-                    type="date"
-                    value={formData.start_date}
-                    onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
-                    className={`w-full ${inputClass}`}
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-muted mb-1.5">Expected Graduation Date (optional)</label>
-                  <input
-                    type="date"
-                    value={formData.graduation_date}
-                    onChange={(e) => setFormData({ ...formData, graduation_date: e.target.value })}
-                    className={`w-full ${inputClass}`}
-                  />
-                </div>
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="Tuition Amount"
-                  value={formData.tuition_amount}
-                  onChange={(e) => setFormData({ ...formData, tuition_amount: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="Commission %"
-                  value={formData.commission_percentage}
-                  onChange={(e) => setFormData({ ...formData, commission_percentage: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <select
-                  value={formData.payment_type}
-                  onChange={(e) => setFormData({ ...formData, payment_type: e.target.value })}
-                  className={inputClass}
-                >
-                  <option value="cash">Paid Cash</option>
-                  <option value="financed">Financed</option>
-                  <option value="other">Other</option>
-                </select>
-                <div>
-                  <label className="block text-xs font-semibold text-muted mb-1.5">Commission Payment Status</label>
-                  <select
-                    value={formData.payment_status}
-                    onChange={(e) => setFormData({ ...formData, payment_status: e.target.value })}
-                    className={`w-full ${inputClass}`}
-                  >
-                    <option value="pending">Pending</option>
-                    <option value="partial">Partially Paid</option>
-                    <option value="paid">Fully Paid</option>
-                  </select>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className={`md:col-span-2 ${primaryBtn}`}
-                >
-                  {loading ? 'Adding...' : '+ Add Student'}
-                </button>
-              </form>
-            </div>
-
-            {/* Students Table */}
-            <div className="bg-white rounded-card border border-border shadow-card p-6">
-              <h2 className="text-lg font-bold text-ink mb-4 flex items-center gap-2">
-                Enrolled Students
-                <span className="text-xs bg-blue-soft text-blue px-2.5 py-1 rounded-pill font-semibold">{enrolled.length}</span>
-              </h2>
-              {enrolled.length === 0 ? (
-                <p className="text-muted text-center py-8 text-sm">No enrolled students yet</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-border">
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Name</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Program</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Expected Graduation</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Tuition</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Commission</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Status</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Payment</th>
-                        <th className="text-center px-4 py-2 font-semibold text-ink">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {enrolled.map(student => (
-                        editingId === student.id ? (
-                          <tr key={student.id} className="border-b border-border bg-blue-tint">
-                            <td className="px-4 py-2">
-                              <input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} className={`w-full ${inputClass}`} />
-                            </td>
-                            <td className="px-4 py-2">
-                              <input value={editForm.program} onChange={(e) => setEditForm({ ...editForm, program: e.target.value })} className={`w-full ${inputClass}`} />
-                            </td>
-                            <td className="px-4 py-2">
-                              <input type="date" value={editForm.graduation_date} onChange={(e) => setEditForm({ ...editForm, graduation_date: e.target.value })} className={`w-full ${inputClass}`} />
-                            </td>
-                            <td className="px-4 py-2">
-                              <input type="number" step="0.01" value={editForm.tuition_amount} onChange={(e) => setEditForm({ ...editForm, tuition_amount: e.target.value })} className={`w-full ${inputClass}`} />
-                            </td>
-                            <td className="px-4 py-2">
-                              <input type="number" step="0.01" value={editForm.commission_percentage} onChange={(e) => setEditForm({ ...editForm, commission_percentage: e.target.value })} className={`w-24 ${inputClass}`} />
-                              <span className="text-xs text-muted ml-1">%</span>
-                            </td>
-                            <td className="px-4 py-2">
-                              <select value={editForm.status} onChange={(e) => setEditForm({ ...editForm, status: e.target.value })} className={inputClass}>
-                                <option value="active">Active</option>
-                                <option value="graduated">Graduated</option>
-                                <option value="dropped">Dropped</option>
-                                <option value="pending">Pending</option>
-                              </select>
-                            </td>
-                            <td className="px-4 py-2">
-                              <select value={editForm.payment_status} onChange={(e) => setEditForm({ ...editForm, payment_status: e.target.value })} className={inputClass}>
-                                <option value="pending">Pending</option>
-                                <option value="partial">Partial</option>
-                                <option value="paid">Paid</option>
-                              </select>
-                            </td>
-                            <td className="px-4 py-3 text-center whitespace-nowrap">
-                              <button onClick={() => saveEdit(student.id)} className="text-blue hover:opacity-70 transition mr-3"><Check size={16} /></button>
-                              <button onClick={cancelEdit} className="text-muted hover:opacity-70 transition"><X size={16} /></button>
-                            </td>
-                          </tr>
-                        ) : (
-                          <tr key={student.id} className="border-b border-border hover:bg-bg-gray">
-                            <td className="px-4 py-3 text-ink">{student.name}</td>
-                            <td className="px-4 py-3 text-body">{student.program}</td>
-                            <td className="px-4 py-3 text-body">{student.graduation_date || '—'}</td>
-                            <td className="px-4 py-3 font-semibold text-ink">${student.tuition_amount.toFixed(2)}</td>
-                            <td className="px-4 py-3 font-semibold text-blue">${student.commission_amount.toFixed(2)}</td>
-                            <td className="px-4 py-3">
-                              <span className={`px-2.5 py-1 rounded-pill text-xs font-semibold ${
-                                student.status === 'active' ? 'bg-green-100 text-green-700' :
-                                student.status === 'graduated' ? 'bg-blue-soft text-blue' :
-                                'bg-red-soft text-red'
-                              }`}>
-                                {student.status}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className={`px-2.5 py-1 rounded-pill text-xs font-semibold ${
-                                student.payment_status === 'paid' ? 'bg-green-100 text-green-700' :
-                                student.payment_status === 'partial' ? 'bg-amber-soft text-amber' :
-                                'bg-bg-gray text-body'
-                              }`}>
-                                {student.payment_status || 'pending'}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 text-center whitespace-nowrap">
-                              {canManage ? (
-                                <>
-                                  <button
-                                    onClick={() => handleMarkGraduate(student)}
-                                    className="text-blue hover:opacity-70 transition mr-3"
-                                    title="Mark as Graduate"
-                                  >
-                                    <GraduationCap size={16} />
-                                  </button>
-                                  <button
-                                    onClick={() => startEdit(student)}
-                                    className="text-blue hover:opacity-70 transition mr-3"
-                                  >
-                                    <Pencil size={16} />
-                                  </button>
-                                  <button
-                                    onClick={() => handleDeleteStudent(student.id)}
-                                    className="text-red hover:opacity-70 transition"
-                                  >
-                                    <Trash2 size={16} />
-                                  </button>
-                                </>
-                              ) : (
-                                <span className="text-xs text-muted">—</span>
-                              )}
-                            </td>
-                          </tr>
-                        )
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+            {renderAddForm(false)}
+            {renderTable(enrolled, false)}
           </div>
         )}
 
         {/* Graduates Tab */}
         {activeTab === 'graduates' && (
           <div className="space-y-6">
-            {/* Add Form */}
-            <div className="bg-white rounded-card border border-border shadow-card p-6">
-              <h2 className="text-lg font-bold text-ink mb-4">Add Graduate</h2>
-              <form onSubmit={(e) => {
-                e.preventDefault();
-                setFormData({ ...formData, is_graduate: true });
-                handleAddStudent(e);
-                setFormData({ ...formData, is_graduate: false });
-              }} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <input
-                  type="text"
-                  placeholder="Name"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <input
-                  type="text"
-                  placeholder="Program"
-                  value={formData.program}
-                  onChange={(e) => setFormData({ ...formData, program: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <input
-                  type="email"
-                  placeholder="Email"
-                  value={formData.email}
-                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                  className={inputClass}
-                />
-                <div>
-                  <label className="block text-xs font-semibold text-muted mb-1.5">Start Date</label>
-                  <input
-                    type="date"
-                    value={formData.start_date}
-                    onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
-                    className={`w-full ${inputClass}`}
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-muted mb-1.5">Graduation Date</label>
-                  <input
-                    type="date"
-                    value={formData.graduation_date}
-                    onChange={(e) => setFormData({ ...formData, graduation_date: e.target.value })}
-                    className={`w-full ${inputClass}`}
-                    required
-                  />
-                </div>
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="Tuition Amount"
-                  value={formData.tuition_amount}
-                  onChange={(e) => setFormData({ ...formData, tuition_amount: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="Commission %"
-                  value={formData.commission_percentage}
-                  onChange={(e) => setFormData({ ...formData, commission_percentage: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-                <select
-                  value={formData.payment_type}
-                  onChange={(e) => setFormData({ ...formData, payment_type: e.target.value })}
-                  className={inputClass}
-                >
-                  <option value="cash">Paid Cash</option>
-                  <option value="financed">Financed</option>
-                  <option value="other">Other</option>
-                </select>
-                <div>
-                  <label className="block text-xs font-semibold text-muted mb-1.5">Commission Payment Status</label>
-                  <select
-                    value={formData.payment_status}
-                    onChange={(e) => setFormData({ ...formData, payment_status: e.target.value })}
-                    className={`w-full ${inputClass}`}
-                  >
-                    <option value="pending">Pending</option>
-                    <option value="partial">Partially Paid</option>
-                    <option value="paid">Fully Paid</option>
-                  </select>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className={`md:col-span-2 ${primaryBtn}`}
-                >
-                  {loading ? 'Adding...' : '+ Add Graduate'}
-                </button>
-              </form>
-            </div>
-
-            {/* Graduates Table */}
-            <div className="bg-white rounded-card border border-border shadow-card p-6">
-              <h2 className="text-lg font-bold text-ink mb-4 flex items-center gap-2">
-                Graduates
-                <span className="text-xs bg-blue-soft text-blue px-2.5 py-1 rounded-pill font-semibold">{graduates.length}</span>
-              </h2>
-              {graduates.length === 0 ? (
-                <p className="text-muted text-center py-8 text-sm">No graduates yet</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-border">
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Name</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Program</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Grad Date</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Tuition</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Commission</th>
-                        <th className="text-left px-4 py-2 font-semibold text-ink">Payment</th>
-                        <th className="text-center px-4 py-2 font-semibold text-ink">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {graduates.map(student => (
-                        editingId === student.id ? (
-                          <tr key={student.id} className="border-b border-border bg-blue-tint">
-                            <td className="px-4 py-2">
-                              <input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} className={`w-full ${inputClass}`} />
-                            </td>
-                            <td className="px-4 py-2">
-                              <input value={editForm.program} onChange={(e) => setEditForm({ ...editForm, program: e.target.value })} className={`w-full ${inputClass}`} />
-                            </td>
-                            <td className="px-4 py-2">
-                              <input type="date" value={editForm.graduation_date} onChange={(e) => setEditForm({ ...editForm, graduation_date: e.target.value })} className={`w-full ${inputClass}`} />
-                            </td>
-                            <td className="px-4 py-2">
-                              <input type="number" step="0.01" value={editForm.tuition_amount} onChange={(e) => setEditForm({ ...editForm, tuition_amount: e.target.value })} className={`w-full ${inputClass}`} />
-                            </td>
-                            <td className="px-4 py-2">
-                              <input type="number" step="0.01" value={editForm.commission_percentage} onChange={(e) => setEditForm({ ...editForm, commission_percentage: e.target.value })} className={`w-24 ${inputClass}`} />
-                              <span className="text-xs text-muted ml-1">%</span>
-                            </td>
-                            <td className="px-4 py-2">
-                              <select value={editForm.payment_status} onChange={(e) => setEditForm({ ...editForm, payment_status: e.target.value })} className={inputClass}>
-                                <option value="pending">Pending</option>
-                                <option value="partial">Partial</option>
-                                <option value="paid">Paid</option>
-                              </select>
-                            </td>
-                            <td className="px-4 py-3 text-center whitespace-nowrap">
-                              <button onClick={() => saveEdit(student.id)} className="text-blue hover:opacity-70 transition mr-3"><Check size={16} /></button>
-                              <button onClick={cancelEdit} className="text-muted hover:opacity-70 transition"><X size={16} /></button>
-                            </td>
-                          </tr>
-                        ) : (
-                          <tr key={student.id} className="border-b border-border hover:bg-bg-gray">
-                            <td className="px-4 py-3 text-ink">{student.name}</td>
-                            <td className="px-4 py-3 text-body">{student.program}</td>
-                            <td className="px-4 py-3 text-body">{student.graduation_date || '—'}</td>
-                            <td className="px-4 py-3 font-semibold text-ink">${student.tuition_amount.toFixed(2)}</td>
-                            <td className="px-4 py-3 font-semibold text-blue">${student.commission_amount.toFixed(2)}</td>
-                            <td className="px-4 py-3">
-                              <span className={`px-2.5 py-1 rounded-pill text-xs font-semibold ${
-                                student.payment_status === 'paid' ? 'bg-green-100 text-green-700' :
-                                student.payment_status === 'partial' ? 'bg-amber-soft text-amber' :
-                                'bg-bg-gray text-body'
-                              }`}>
-                                {student.payment_status || 'pending'}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 text-center whitespace-nowrap">
-                              {canManage ? (
-                                <>
-                                  <button
-                                    onClick={() => startEdit(student)}
-                                    className="text-blue hover:opacity-70 transition mr-3"
-                                  >
-                                    <Pencil size={16} />
-                                  </button>
-                                  <button
-                                    onClick={() => handleDeleteStudent(student.id)}
-                                    className="text-red hover:opacity-70 transition"
-                                  >
-                                    <Trash2 size={16} />
-                                  </button>
-                                </>
-                              ) : (
-                                <span className="text-xs text-muted">—</span>
-                              )}
-                            </td>
-                          </tr>
-                        )
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+            {renderAddForm(true)}
+            {renderTable(graduates, true)}
           </div>
         )}
 
-        {/* Summary Tab */}
-        {activeTab === 'summary' && report && (
+        {/* Summary Tab — reps: their own workflow */}
+        {activeTab === 'summary' && isRep && report && (
           <div className="space-y-6">
-            {/* Approval Status */}
             <div className="bg-white rounded-card border border-border shadow-card p-6">
               <h2 className="text-lg font-bold text-ink mb-6">Approval Workflow</h2>
               <div className="flex justify-between items-center">
@@ -1093,71 +1115,177 @@ export default function App() {
                 </div>
               </div>
 
-              {user?.role === 'ADMISSIONS_REP' && report.approval_status === 'draft' && (
+              {report.approval_status === 'draft' && (
                 <button
                   onClick={handleSubmitForApproval}
-                  disabled={loading || enrolled.length === 0}
+                  disabled={loading || students.length === 0}
                   className={`w-full mt-6 ${primaryBtn}`}
                 >
                   Submit for Approval
                 </button>
               )}
+            </div>
+            {summaryCards}
+          </div>
+        )}
 
-              {user?.role === 'MARCELO' && report.approval_status === 'submitted' && (
-                <button
-                  onClick={handleApprove}
-                  disabled={loading}
-                  className={`w-full mt-6 ${primaryBtn}`}
-                >
-                  Approve Commission
-                </button>
+        {/* Summary Tab — managers: per-rep review for the location */}
+        {activeTab === 'summary' && canManage && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-card border border-border shadow-card p-6">
+              <h2 className="text-lg font-bold text-ink mb-1">{viewLocation} rep approvals — {currentMonth}</h2>
+              <p className="text-sm text-body mb-4">Each rep submits their own month. {isSuperAdmin ? 'Approve each one once reviewed.' : 'Marcelo gives final approval.'}</p>
+              {repRows.length === 0 ? (
+                <p className="text-muted text-center py-8 text-sm">No {viewLocation} reps yet</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border">
+                        <th className="text-left px-4 py-2 font-semibold text-ink">Rep</th>
+                        <th className="text-right px-4 py-2 font-semibold text-ink">Enrolled</th>
+                        <th className="text-right px-4 py-2 font-semibold text-ink">Graduates</th>
+                        <th className="text-right px-4 py-2 font-semibold text-ink">Tuition</th>
+                        <th className="text-right px-4 py-2 font-semibold text-ink">Commission</th>
+                        <th className="text-left px-4 py-2 font-semibold text-ink">Status</th>
+                        <th className="text-left px-4 py-2 font-semibold text-ink">Submitted</th>
+                        <th className="text-right px-4 py-2 font-semibold text-ink">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {repRows.map((row) => (
+                        <tr key={row.rep_id} className={`border-b border-border hover:bg-bg-gray ${String(row.rep_id) === viewRep ? 'bg-blue-tint' : ''}`}>
+                          <td className="px-4 py-3">
+                            <button onClick={() => { setViewRep(String(row.rep_id)); setActiveTab('enrolled'); }} className="font-semibold text-ink hover:text-blue text-left" title="See this rep's records">
+                              {row.rep_name}
+                            </button>
+                          </td>
+                          <td className="px-4 py-3 text-right tabular-nums text-body">{row.enrolled_count}</td>
+                          <td className="px-4 py-3 text-right tabular-nums text-body">{row.graduate_count}</td>
+                          <td className="px-4 py-3 text-right tabular-nums text-ink">{fmt(row.total_tuition)}</td>
+                          <td className="px-4 py-3 text-right tabular-nums font-semibold text-blue">{fmt(row.total_commission)}</td>
+                          <td className="px-4 py-3">{statusBadge(row.approval_status)}</td>
+                          <td className="px-4 py-3 text-body text-xs">{row.submitted_at ? new Date(row.submitted_at).toLocaleDateString() : '—'}</td>
+                          <td className="px-4 py-3 text-right whitespace-nowrap">
+                            {isSuperAdmin && row.approval_status === 'submitted' ? (
+                              <button onClick={() => handleApprove(row)} disabled={loading} className={`${primaryBtn} !py-1.5 !px-4 text-xs`}>Approve</button>
+                            ) : row.approval_status === 'approved' ? (
+                              <span className="text-xs text-green-700 font-semibold">Approved {row.approved_at ? new Date(row.approved_at).toLocaleDateString() : ''}</span>
+                            ) : row.approval_status === 'draft' ? (
+                              <span className="text-xs text-muted">Waiting for rep</span>
+                            ) : (
+                              <span className="text-xs text-muted">Awaiting Marcelo</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                      <tr className="font-semibold">
+                        <td className="px-4 py-3 text-ink">Total {viewLocation}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{repRows.reduce((s, r) => s + r.enrolled_count, 0)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{repRows.reduce((s, r) => s + r.graduate_count, 0)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{fmt(repRows.reduce((s, r) => s + r.total_tuition, 0))}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-blue">{fmt(repRows.reduce((s, r) => s + r.total_commission, 0))}</td>
+                        <td colSpan={3} />
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
+            {summaryCards}
+          </div>
+        )}
 
-            {/* Summary Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="bg-white rounded-card border border-border shadow-card p-6">
-                <p className="text-xs text-muted font-semibold uppercase tracking-wide mb-2">Total Enrolled Students</p>
-                <p className="text-3xl font-extrabold text-ink">{report.enrolled_count}</p>
-              </div>
+        {/* Dashboard Tab — all months, not tied to the month selector */}
+        {activeTab === 'dashboard' && canManage && (
+          <Dashboard
+            apiBase={API_BASE}
+            getAuthHeader={getAuthHeader}
+            onAuthError={handleAuthError}
+            location={viewLocation}
+            repFilter={viewRep}
+          />
+        )}
 
-              <div className="bg-white rounded-card border border-border shadow-card p-6">
-                <p className="text-xs text-muted font-semibold uppercase tracking-wide mb-2">Total Graduates</p>
-                <p className="text-3xl font-extrabold text-ink">{report.graduate_count}</p>
-              </div>
-
-              <div className="bg-white rounded-card border border-border shadow-card p-6">
-                <p className="text-xs text-muted font-semibold uppercase tracking-wide mb-2">Enrolled Tuition</p>
-                <p className="text-3xl font-extrabold text-ink">${report.total_enrolled_tuition.toFixed(2)}</p>
-              </div>
-
-              <div className="bg-blue-soft rounded-card p-6">
-                <p className="text-xs text-blue font-semibold uppercase tracking-wide mb-2">Enrolled Commission</p>
-                <p className="text-3xl font-extrabold text-blue">${report.total_enrolled_commission.toFixed(2)}</p>
-              </div>
-
-              <div className="bg-white rounded-card border border-border shadow-card p-6">
-                <p className="text-xs text-muted font-semibold uppercase tracking-wide mb-2">Graduate Tuition</p>
-                <p className="text-3xl font-extrabold text-ink">${report.total_graduate_tuition.toFixed(2)}</p>
-              </div>
-
-              <div className="bg-blue-soft rounded-card p-6">
-                <p className="text-xs text-blue font-semibold uppercase tracking-wide mb-2">Graduate Commission</p>
-                <p className="text-3xl font-extrabold text-blue">${report.total_graduate_commission.toFixed(2)}</p>
-              </div>
-
-              <div className="md:col-span-2 bg-blue rounded-card p-6">
-                <p className="text-xs text-white/80 font-semibold uppercase tracking-wide mb-2">Total Commission</p>
-                <p className="text-4xl font-extrabold text-white">${report.total_commission.toFixed(2)}</p>
-              </div>
+        {/* Duplicates Tab — managers: students appearing more than once across months */}
+        {activeTab === 'duplicates' && canManage && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-card border border-border shadow-card p-6">
+              <h2 className="text-lg font-bold text-ink mb-1">Possible double payments</h2>
+              <p className="text-sm text-body mb-6">
+                Students matched by email (or by name when there's no email) who show up in more than one month.
+                Groups with 2 or more records already marked Paid or Partial are the real risk — highlighted below.
+                Some recurrence is expected (a separate enrollment vs. graduation commission, or installment payments
+                tracked month to month) — use this as a starting point to check, not an automatic verdict.
+              </p>
+              {duplicates.length === 0 ? (
+                <p className="text-muted text-center py-8 text-sm">No repeated students found — nothing to review.</p>
+              ) : (
+                <div className="space-y-6">
+                  {duplicates.map((group) => {
+                    const risky = group.paid_or_partial_count >= 2;
+                    return (
+                      <div key={`${group.match_type}-${group.match_key}`} className={`rounded-[10px] border p-4 ${risky ? 'border-red/30 bg-red-soft/40' : 'border-border'}`}>
+                        <div className="flex flex-wrap items-center gap-2 mb-3">
+                          {risky && <AlertTriangle size={16} className="text-red shrink-0" />}
+                          <span className="font-semibold text-ink">{group.records[0]?.name}</span>
+                          <span className="text-xs text-muted">matched by {group.match_type} · {group.match_key}</span>
+                          <span className={`text-xs px-2 py-0.5 rounded-pill font-semibold ml-auto ${risky ? 'bg-red text-white' : 'bg-bg-gray text-body'}`}>
+                            {group.paid_or_partial_count} of {group.records.length} paid/partial
+                          </span>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b border-border">
+                                <th className="text-left px-3 py-1.5 font-semibold text-ink">Month</th>
+                                <th className="text-left px-3 py-1.5 font-semibold text-ink">Rep</th>
+                                <th className="text-left px-3 py-1.5 font-semibold text-ink">Type</th>
+                                <th className="text-left px-3 py-1.5 font-semibold text-ink">Tuition</th>
+                                <th className="text-left px-3 py-1.5 font-semibold text-ink">Commission</th>
+                                <th className="text-left px-3 py-1.5 font-semibold text-ink">Payment</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {group.records.map((r) => (
+                                <tr key={r.id} className="border-b border-border last:border-0">
+                                  <td className="px-3 py-2 text-ink">{r.month}</td>
+                                  <td className="px-3 py-2 text-body">{r.rep_name || '—'}{r.location ? ` (${r.location})` : ''}</td>
+                                  <td className="px-3 py-2 text-body">{r.is_graduate ? 'Graduate' : 'Enrolled'}</td>
+                                  <td className="px-3 py-2 text-ink">{fmt(r.tuition_amount)}</td>
+                                  <td className="px-3 py-2 font-semibold text-blue">{fmt(r.commission_amount)}</td>
+                                  <td className="px-3 py-2">{paymentBadge(r.payment_status)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
+        )}
+
+        {/* Users Tab — super admin only */}
+        {activeTab === 'users' && isSuperAdmin && (
+          <Users
+            apiBase={API_BASE}
+            getAuthHeader={getAuthHeader}
+            onAuthError={handleAuthError}
+            users={allUsers}
+            currentUserId={user?.id}
+            onChanged={loadUsers}
+            getErrorMessage={getErrorMessage}
+          />
         )}
 
         {/* History Tab */}
         {activeTab === 'history' && (
           <div className="bg-white rounded-card border border-border shadow-card p-6">
-            <h2 className="text-lg font-bold text-ink mb-4">Approval History</h2>
+            <h2 className="text-lg font-bold text-ink mb-4">Approval History{canManage ? ` — ${viewLocation}${viewedRepName ? ` · ${viewedRepName}` : ''}` : ''}</h2>
             {approvals.length === 0 ? (
               <p className="text-muted text-center py-8 text-sm">No approval history yet</p>
             ) : (
@@ -1166,6 +1294,7 @@ export default function App() {
                   <thead>
                     <tr className="border-b border-border">
                       <th className="text-left px-4 py-2 font-semibold text-ink">Month</th>
+                      {canManage && <th className="text-left px-4 py-2 font-semibold text-ink">Rep</th>}
                       <th className="text-left px-4 py-2 font-semibold text-ink">Status</th>
                       <th className="text-left px-4 py-2 font-semibold text-ink">Total Commission</th>
                       <th className="text-left px-4 py-2 font-semibold text-ink">Submitted</th>
@@ -1173,93 +1302,20 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {approvals.map(approval => (
+                    {approvals
+                      .filter((a) => !canManage || viewRep === 'all' || String(a.rep_id) === viewRep)
+                      .map(approval => (
                       <tr key={approval.id} className="border-b border-border hover:bg-bg-gray">
                         <td className="px-4 py-3 font-semibold text-ink">{approval.month}</td>
-                        <td className="px-4 py-3">
-                          <span className={`px-2.5 py-1 rounded-pill text-xs font-semibold ${
-                            approval.status === 'approved' ? 'bg-green-100 text-green-700' :
-                            approval.status === 'submitted' ? 'bg-amber-soft text-amber' :
-                            'bg-bg-gray text-body'
-                          }`}>
-                            {approval.status}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 font-semibold text-blue">${approval.total_commission.toFixed(2)}</td>
+                        {canManage && <td className="px-4 py-3 text-body">{approval.rep_name || '—'}</td>}
+                        <td className="px-4 py-3">{statusBadge(approval.status)}</td>
+                        <td className="px-4 py-3 font-semibold text-blue">{fmt(approval.total_commission)}</td>
                         <td className="px-4 py-3 text-body text-xs">{approval.rep_submitted_at ? new Date(approval.rep_submitted_at).toLocaleDateString() : '—'}</td>
                         <td className="px-4 py-3 text-body text-xs">{approval.marcelo_approved_at ? new Date(approval.marcelo_approved_at).toLocaleDateString() : '—'}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Duplicates Tab — Admin/Marcelo only */}
-        {activeTab === 'duplicates' && (
-          <div className="bg-white rounded-card border border-border shadow-card p-6">
-            <h2 className="text-lg font-bold text-ink mb-1 flex items-center gap-2">
-              <AlertTriangle size={18} className="text-red" />
-              Potential Duplicate Students
-            </h2>
-            <p className="text-sm text-body mb-6">
-              Same student (matched by email, or by name when there's no email) found in more than one month. Groups highlighted in red already have 2 or more records marked Paid or Partial — review those first, since that's the actual double-payment risk.
-            </p>
-
-            {duplicates.length === 0 ? (
-              <p className="text-muted text-center py-8 text-sm">No potential duplicates found</p>
-            ) : (
-              <div className="space-y-4">
-                {duplicates.map((group, idx) => (
-                  <div
-                    key={idx}
-                    className={`border rounded-[10px] p-4 ${group.paid_or_partial_count >= 2 ? 'border-red/30 bg-red-soft' : 'border-border'}`}
-                  >
-                    <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
-                      <span className="font-semibold text-ink text-sm flex items-center gap-2">
-                        {group.paid_or_partial_count >= 2 && <AlertTriangle size={15} className="text-red" />}
-                        Matched by {group.match_type}: {group.match_key}
-                      </span>
-                      <span className="text-xs bg-white border border-border px-2.5 py-1 rounded-pill font-semibold text-body">
-                        {group.records.length} records
-                      </span>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-border">
-                            <th className="text-left px-3 py-1.5 font-semibold text-ink">Name</th>
-                            <th className="text-left px-3 py-1.5 font-semibold text-ink">Month</th>
-                            <th className="text-left px-3 py-1.5 font-semibold text-ink">Program</th>
-                            <th className="text-left px-3 py-1.5 font-semibold text-ink">Commission</th>
-                            <th className="text-left px-3 py-1.5 font-semibold text-ink">Payment</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {group.records.map(r => (
-                            <tr key={r.id} className="border-b border-border last:border-0">
-                              <td className="px-3 py-2 text-ink">{r.name}</td>
-                              <td className="px-3 py-2 text-body">{r.month}</td>
-                              <td className="px-3 py-2 text-body">{r.program}</td>
-                              <td className="px-3 py-2 font-semibold text-blue">${r.commission_amount.toFixed(2)}</td>
-                              <td className="px-3 py-2">
-                                <span className={`px-2 py-0.5 rounded-pill text-xs font-semibold ${
-                                  r.payment_status === 'paid' ? 'bg-green-100 text-green-700' :
-                                  r.payment_status === 'partial' ? 'bg-amber-soft text-amber' :
-                                  'bg-bg-gray text-body'
-                                }`}>
-                                  {r.payment_status || 'pending'}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                ))}
               </div>
             )}
           </div>
