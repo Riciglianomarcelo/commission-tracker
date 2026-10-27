@@ -53,7 +53,9 @@ class StudentCreate(BaseModel):
     commission_percentage: float
     payment_type: str  # cash, financed, other
     status: str  # active, graduated, dropped, pending
-    payment_status: str = "pending"  # paid, partial, pending — has the commission been paid out
+    # Records always start unpaid; payouts are recorded afterwards by Admin/Marcelo
+    # through POST /students/{id}/payment (this field is ignored on create).
+    payment_status: str = "pending"
     email: Optional[str] = None
     is_graduate: bool = False
     month: str  # YYYY-MM format
@@ -68,6 +70,8 @@ class StudentUpdate(BaseModel):
     payment_type: Optional[str] = None
     status: Optional[str] = None
     payment_status: Optional[str] = None
+    paid_amount: Optional[float] = None
+    confirm_duplicate: bool = False
     graduation_date: Optional[date] = None
     is_graduate: Optional[bool] = None
     # Commission month (YYYY-MM). Only the super admin (MARCELO) may change it —
@@ -88,6 +92,10 @@ class StudentResponse(BaseModel):
     payment_type: str
     status: str
     payment_status: str = "pending"
+    paid_amount: Optional[float] = 0.0
+    paid_total: float = 0.0          # how much has actually been paid out
+    outstanding_amount: float = 0.0  # commission still left to pay
+    paid_at: Optional[date] = None
     is_graduate: bool
     month: str
     email: Optional[str] = None
@@ -99,11 +107,23 @@ class StudentResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class PaymentUpdate(BaseModel):
+    payment_status: str  # pending, partial, paid
+    paid_amount: Optional[float] = None  # required when partial: total paid so far
+    confirm_duplicate: bool = False  # set after the user acknowledged a double-payment warning
+
 class DuplicateGroup(BaseModel):
     match_key: str
     match_type: str  # "email" or "name" — email is the more reliable signal
+    risk: str  # double_paid, at_risk, repeat
+    reason: str
     paid_or_partial_count: int
     records: list[StudentResponse]
+
+class DuplicateReport(BaseModel):
+    students_checked: int
+    months_checked: int
+    groups: list[DuplicateGroup]
 
 class ApprovalCreate(BaseModel):
     month: str  # YYYY-MM
@@ -135,6 +155,8 @@ class MonthlyReportResponse(BaseModel):
     total_graduate_commission: float
     total_tuition: float
     total_commission: float
+    total_paid: float = 0.0
+    total_outstanding: float = 0.0
     approval_status: str
     submitted_at: Optional[datetime]
     approved_at: Optional[datetime]
@@ -147,6 +169,8 @@ class RepMonthSummary(BaseModel):
     graduate_count: int
     total_tuition: float
     total_commission: float
+    total_paid: float = 0.0
+    total_outstanding: float = 0.0
     approval_status: str
     submitted_at: Optional[datetime]
     approved_at: Optional[datetime]
