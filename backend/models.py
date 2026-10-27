@@ -55,6 +55,8 @@ class Student(Base):
     payment_type = Column(String)  # cash, financed, other
     status = Column(String)  # active, graduated, dropped, pending
     payment_status = Column(String, default="pending")  # paid, partial, pending — has the commission actually been paid out
+    paid_amount = Column(Float, default=0.0)  # only meaningful while payment_status == "partial"
+    paid_at = Column(Date, nullable=True)  # when the payout was first recorded
     month = Column(String, index=True)  # Format: YYYY-MM (e.g., "2026-09")
     is_graduate = Column(Boolean, default=False)
     commission_amount = Column(Float, default=0.0)
@@ -72,6 +74,21 @@ class Student(Base):
     @property
     def rep_name(self):
         return self.rep.display_name if self.rep else None
+
+    @property
+    def paid_total(self):
+        """How much of this commission has actually been paid out."""
+        commission = self.commission_amount or 0.0
+        if self.payment_status == "paid":
+            return commission
+        if self.payment_status == "partial":
+            return min(self.paid_amount or 0.0, commission)
+        return 0.0
+
+    @property
+    def outstanding_amount(self):
+        """What is still left to pay on this record."""
+        return max((self.commission_amount or 0.0) - self.paid_total, 0.0)
 
 class Approval(Base):
     """One approval per rep per month."""

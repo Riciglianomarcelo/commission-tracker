@@ -4,14 +4,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional
 from database import engine, get_db, SessionLocal
 from models import Base, User, Student, Approval, AuditLog, LOCATIONS
 from migrations import run_migrations
 from schemas import (
     UserCreate, UserUpdate, UserResponse, UserLogin, ChangePasswordRequest, TokenResponse,
-    StudentCreate, StudentUpdate, StudentResponse, DuplicateGroup,
+    StudentCreate, StudentUpdate, StudentResponse, DuplicateGroup, DuplicateReport, PaymentUpdate,
     ApprovalCreate, ApprovalResponse, MonthlyReportResponse, RepMonthSummary
 )
 from auth_utils import (
@@ -21,6 +21,7 @@ from auth_utils import (
 from config import settings
 import os
 import re
+import unicodedata
 from pathlib import Path
 
 # Create tables, then upgrade any existing ones in place
@@ -134,6 +135,83 @@ def log_action(db: Session, user: User, action: str, entity_type: str, entity_id
     db.add(AuditLog(user_id=user.id, action=action, entity_type=entity_type,
                     entity_id=entity_id, changes=changes, month=month))
     db.commit()
+
+# ---------- Payments & duplicate detection ----------
+
+PAYMENT_STATUSES = ("pending", "partial", "paid")
+
+def norm_name(name: Optional[str]) -> str:
+    """Lower-case, accent-free, single-spaced — so 'José  Pérez' matches 'jose perez'."""
+    base = unicodedata.normalize("NFKD", name or "")
+    base = "".join(c for c in base if not unicodedata.combining(c))
+    return " ".join(base.lower().split())
+
+def money(n: float) -> str:
+    return f"${n:,.2f}"
+
+def same_student_records(db: Session, student: Student) -> list:
+    """Other records of the SAME kind (enrolled vs graduate) for the same person,
+    matched by email or by normalized name. An enrolled record plus a later graduate
+    record is expected (two different commissions) — only same-kind repeats are risky."""
+    email = (student.email or "").strip().lower()
+    name = norm_name(student.name)
+    out = []
+    for o in db.query(Student).filter(Student.id != student.id, Student.is_graduate == student.is_graduate).all():
+        if (email and (o.email or "").strip().lower() == email) or (name and norm_name(o.name) == name):
+            out.append(o)
+    return out
+
+def apply_payment(db: Session, user: User, student: Student, new_status: str,
+                  paid_amount: Optional[float], confirm_duplicate: bool):
+    """Record a payout on one commission record, refusing a likely double payment
+    unless the user has explicitly confirmed it."""
+    if new_status not in PAYMENT_STATUSES:
+        raise HTTPException(status_code=422, detail=f"Payment status must be one of {', '.join(PAYMENT_STATUSES)}")
+    commission = student.commission_amount or 0.0
+
+    if new_status == "partial":
+        if paid_amount is None or paid_amount <= 0:
+            raise HTTPException(status_code=422, detail="Enter how much has been paid so far")
+        if paid_amount >= commission - 0.005:
+            raise HTTPException(status_code=422, detail=f"That is the full commission ({money(commission)}) — choose Paid instead")
+
+    starting_to_pay = new_status in ("paid", "partial") and student.payment_status not in ("paid", "partial")
+    if starting_to_pay and not confirm_duplicate:
+        already = [o for o in same_student_records(db, student) if o.payment_status in ("paid", "partial")]
+        if already:
+            raise HTTPException(status_code=409, detail={
+                "code": "possible_duplicate",
+                "message": f"{student.name} already has a {'graduate' if student.is_graduate else 'enrolled'} commission marked as paid in another month.",
+                "matches": [{
+                    "id": o.id, "month": o.month, "rep_name": o.rep_name,
+                    "payment_status": o.payment_status, "paid_total": o.paid_total,
+                    "commission_amount": o.commission_amount, "paid_at": o.paid_at.isoformat() if o.paid_at else None,
+                } for o in already],
+            })
+
+    old = student.payment_status
+    student.payment_status = new_status
+    if new_status == "paid":
+        student.paid_amount = commission
+        student.paid_at = student.paid_at or date.today()
+    elif new_status == "partial":
+        student.paid_amount = round(paid_amount, 2)
+        student.paid_at = student.paid_at or date.today()
+    else:
+        student.paid_amount = 0.0
+        student.paid_at = None
+    db.commit()
+    db.refresh(student)
+    detail = f"{old or 'pending'} → {new_status}" + (f" ({money(student.paid_total)})" if new_status != "pending" else "")
+    if confirm_duplicate and starting_to_pay:
+        detail += " [duplicate warning acknowledged]"
+    log_action(db, user, "payment", "Student", student.id, f"{student.name}: {detail}", student.month)
+    return student
+
+def month_totals(students: list) -> dict:
+    earned = sum(s.commission_amount or 0 for s in students)
+    paid = sum(s.paid_total for s in students)
+    return {"earned": earned, "paid": paid, "outstanding": max(earned - paid, 0.0)}
 
 # ==================== AUTH ENDPOINTS ====================
 
@@ -345,7 +423,8 @@ def create_student(
         commission_amount=commission,
         payment_type=student.payment_type,
         status=student.status,
-        payment_status=student.payment_status,
+        payment_status="pending",   # payouts are recorded later via /students/{id}/payment
+        paid_amount=0.0,
         email=student.email,
         is_graduate=student.is_graduate,
         month=student.month,
@@ -375,46 +454,103 @@ def list_students(
     q = scope_students(db.query(Student).filter(Student.month == month), user, location, rep_id)
     return q.order_by(Student.name).all()
 
-@app.get("/api/v1/students/duplicates", response_model=list[DuplicateGroup])
+RISK_RANK = {"double_paid": 3, "at_risk": 2, "repeat": 1}
+
+@app.get("/api/v1/students/duplicates", response_model=DuplicateReport)
 def find_duplicate_students(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    Flag students who may have been entered more than once across different
-    months — the scenario that risks a duplicate/double commission payment.
-    The per-month unique constraint on (email, month) already blocks the same
-    email being added twice in the same month, so this looks across ALL
-    months and reps/locations instead, grouping by email when present (most
-    reliable) and falling back to normalized name otherwise. Only groups with
-    more than one record are returned, ranked so the ones with 2+ records
-    already marked paid/partial (the real double-payment risk) come first.
+    Scan every record (all months, reps and locations) for the same student entered
+    more than once as the same kind of commission (enrolled or graduate):
+      double_paid — 2+ of those records are already paid/partly paid
+      at_risk     — one is paid and another is still pending: paying it would double up
+      repeat      — entered twice but nothing paid yet (likely a double entry)
+    An enrolled record plus a later graduate record is NOT flagged — that is two
+    different commissions by design. Students are matched by email or normalized name.
     """
     require_manager(user)
 
-    all_students = db.query(Student).order_by(Student.month.desc()).all()
+    students = db.query(Student).order_by(Student.month.desc(), Student.id.desc()).all()
+    parent = {s.id: s.id for s in students}
 
-    groups = {}
-    for s in all_students:
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    seen = {}
+    for s in students:
+        keys = []
         if s.email and s.email.strip():
-            match_type = "email"
-            key = s.email.strip().lower()
-        else:
-            match_type = "name"
-            key = s.name.strip().lower()
-        groups.setdefault((match_type, key), []).append(s)
+            keys.append("e:" + s.email.strip().lower())
+        if norm_name(s.name):
+            keys.append("n:" + norm_name(s.name))
+        for k in keys:
+            if k in seen:
+                parent[find(s.id)] = find(seen[k])
+            else:
+                seen[k] = s.id
 
-    duplicates = []
-    for (match_type, key), records in groups.items():
-        if len(records) < 2:
+    clusters = {}
+    for s in students:
+        clusters.setdefault(find(s.id), []).append(s)
+
+    groups = []
+    for recs in clusters.values():
+        if len(recs) < 2:
             continue
-        paid_or_partial_count = sum(1 for r in records if r.payment_status in ("paid", "partial"))
-        duplicates.append(DuplicateGroup(
-            match_key=key,
-            match_type=match_type,
-            paid_or_partial_count=paid_or_partial_count,
-            records=records
+        worst, reason, worst_paid = None, "", 0
+        for is_grad, label in ((False, "enrolled"), (True, "graduate")):
+            same = [r for r in recs if r.is_graduate == is_grad]
+            if len(same) < 2:
+                continue
+            paid = [r for r in same if r.payment_status in ("paid", "partial")]
+            pending = [r for r in same if r.payment_status not in ("paid", "partial")]
+            if len(paid) >= 2:
+                risk = "double_paid"
+                r_reason = f"Paid {len(paid)} times as {label} ({', '.join(sorted(r.month for r in paid))}) — check whether this was a double payment."
+            elif len(paid) == 1:
+                risk = "at_risk"
+                r_reason = (f"Already paid as {label} in {paid[0].month}; another {label} record "
+                            f"({', '.join(sorted(r.month for r in pending))}) is still pending — paying it would be a double payment.")
+            else:
+                risk = "repeat"
+                r_reason = f"Entered {len(same)} times as {label} ({', '.join(sorted(r.month for r in same))}), nothing paid yet — likely a double entry."
+            if worst is None or RISK_RANK[risk] > RISK_RANK[worst]:
+                worst, reason, worst_paid = risk, r_reason, len(paid)
+        if worst is None:
+            continue
+        emails = [r.email.strip().lower() for r in recs if r.email and r.email.strip()]
+        by_email = any(emails.count(e) >= 2 for e in set(emails))
+        groups.append(DuplicateGroup(
+            match_key=(emails[0] if by_email else norm_name(recs[0].name)),
+            match_type="email" if by_email else "name",
+            risk=worst,
+            reason=reason,
+            paid_or_partial_count=sum(1 for r in recs if r.payment_status in ("paid", "partial")),
+            records=sorted(recs, key=lambda r: (r.month, r.id), reverse=True),
         ))
 
-    duplicates.sort(key=lambda d: (d.paid_or_partial_count, len(d.records)), reverse=True)
-    return duplicates
+    groups.sort(key=lambda g: (RISK_RANK[g.risk], len(g.records)), reverse=True)
+    return DuplicateReport(
+        students_checked=len(students),
+        months_checked=len({s.month for s in students}),
+        groups=groups,
+    )
+
+@app.post("/api/v1/students/{student_id}/payment", response_model=StudentResponse)
+def record_payment(
+    student_id: int,
+    payment: PaymentUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a commission pending / partly paid / paid (Admin/Marcelo). Warns before double payments."""
+    require_manager(user)
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    return apply_payment(db, user, student, payment.payment_status, payment.paid_amount, payment.confirm_duplicate)
 
 @app.get("/api/v1/students/{student_id}", response_model=StudentResponse)
 def get_student(student_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -442,6 +578,12 @@ def update_student(
 
     update_data = update.dict(exclude_unset=True)
     old_month, old_rep = student.month, student.rep_id
+    old_commission = student.commission_amount or 0.0
+
+    # Payment fields go through the same guarded path as the "Record payment" action
+    pay_status = update_data.pop("payment_status", None)
+    pay_amount = update_data.pop("paid_amount", None)
+    confirm_dup = update_data.pop("confirm_duplicate", False)
 
     # --- Commission month change (super admin only) ---
     new_month = update_data.pop("month", None)
@@ -479,9 +621,16 @@ def update_student(
     # Recalculate commission if tuition or percentage changed
     if "tuition_amount" in update_data or "commission_percentage" in update_data:
         student.commission_amount = student.tuition_amount * (student.commission_percentage / 100)
+        # A commission raised after it was fully paid leaves the difference still owed
+        if student.payment_status == "paid" and student.commission_amount > old_commission + 0.005:
+            student.payment_status = "partial"
+            student.paid_amount = old_commission
 
     db.commit()
     db.refresh(student)
+
+    if pay_status is not None and (pay_status != student.payment_status or pay_amount is not None):
+        apply_payment(db, user, student, pay_status, pay_amount, confirm_dup)
 
     # Keep stored approval totals in sync with the records actually in each rep-month
     refresh_approval_total(db, student.month, student.rep_id)
@@ -621,6 +770,8 @@ def approvals_for_month(
             graduate_count=sum(1 for s in mine if s.is_graduate),
             total_tuition=sum(s.tuition_amount or 0 for s in mine),
             total_commission=sum(s.commission_amount or 0 for s in mine),
+            total_paid=sum(s.paid_total for s in mine),
+            total_outstanding=month_totals(mine)["outstanding"],
             approval_status=apr.status if apr else "draft",
             submitted_at=apr.rep_submitted_at if apr else None,
             approved_at=apr.marcelo_approved_at if apr else None,
@@ -671,6 +822,8 @@ def _build_report(db: Session, user: User, month: str, location: Optional[str], 
         total_graduate_commission=total_graduate_commission,
         total_tuition=total_enrolled_tuition + total_graduate_tuition,
         total_commission=total_enrolled_commission + total_graduate_commission,
+        total_paid=month_totals(students)["paid"],
+        total_outstanding=month_totals(students)["outstanding"],
         approval_status=status_,
         submitted_at=submitted,
         approved_at=approved,
